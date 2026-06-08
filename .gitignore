@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.worktrees/
+.env
+.env.*
