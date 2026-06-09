@@ -1,3 +1,5 @@
+import type { HaBinding } from "./ha";
+
 export type Vector3Values = {
   x: number;
   y: number;
@@ -6,6 +8,7 @@ export type Vector3Values = {
 
 export type ModelTreeNode = {
   id: string;
+  objectId: string | null;
   name: string;
   type: string;
   depth: number;
@@ -15,6 +18,10 @@ export type ModelTreeNode = {
 
 export type ObjectMetadata = {
   id: string;
+  objectId: string | null;
+  bindingGroupId: string | null;
+  entityId: string | null;
+  bindings: HaBinding[];
   name: string;
   type: string;
   parentName: string | null;
@@ -25,12 +32,19 @@ export type ObjectMetadata = {
   scale: Vector3Values;
 };
 
+export type SelectionTransformInfo = {
+  center: Vector3Values;
+  size: Vector3Values;
+  scale: Vector3Values;
+};
+
 export type EnvironmentConfig = {
   ambientIntensity: number;
   directionalIntensity: number;
   directionalPosition: Vector3Values;
   exposure: number;
   gridVisible: boolean;
+  wallOpacity: number;
 };
 
 export type ViewMode = "perspective" | "top" | "front" | "side";
@@ -41,4 +55,5 @@ export const defaultEnvironment: EnvironmentConfig = {
   directionalPosition: { x: -6, y: 10, z: 5 },
   exposure: 1.05,
   gridVisible: true,
+  wallOpacity: 0.28,
 };

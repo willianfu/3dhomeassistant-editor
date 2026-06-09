@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { EditorHistoryState } from "../../lib/editor-history";
 import { ThreeEditor } from "../../lib/three-editor";
 import type { ViewMode } from "../../types/editor";
 
@@ -6,25 +7,30 @@ type ViewportProps = {
   onReady: (editor: ThreeEditor | null) => void;
   onSelectionChange: (uuids: string[]) => void;
   onModelChange: () => void;
+  onHistoryChange: (state: EditorHistoryState) => void;
   onLoadProgress: (progress: number) => void;
   isLoading: boolean;
   error: string | null;
   viewMode: ViewMode;
+  previewMode: boolean;
 };
 
 export function Viewport({
   onReady,
   onSelectionChange,
   onModelChange,
+  onHistoryChange,
   onLoadProgress,
   isLoading,
   error,
   viewMode,
+  previewMode,
 }: ViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const callbacksRef = useRef({
     onSelectionChange,
     onModelChange,
+    onHistoryChange,
     onLoadProgress,
   });
   const editorRef = useRef<ThreeEditor | null>(null);
@@ -33,9 +39,10 @@ export function Viewport({
     callbacksRef.current = {
       onSelectionChange,
       onModelChange,
+      onHistoryChange,
       onLoadProgress,
     };
-  }, [onLoadProgress, onModelChange, onSelectionChange]);
+  }, [onHistoryChange, onLoadProgress, onModelChange, onSelectionChange]);
 
   useEffect(() => {
     if (!hostRef.current) {
@@ -44,6 +51,7 @@ export function Viewport({
     const editor = new ThreeEditor(hostRef.current, {
       onSelectionChange: (uuid) => callbacksRef.current.onSelectionChange(uuid),
       onModelChange: () => callbacksRef.current.onModelChange(),
+      onHistoryChange: (state) => callbacksRef.current.onHistoryChange(state),
       onLoadProgress: (progress) => callbacksRef.current.onLoadProgress(progress),
     });
     editor.init();
@@ -70,11 +78,13 @@ export function Viewport({
   return (
     <section className="relative min-w-0 flex-1 overflow-hidden bg-[#0b1017]">
       <div ref={hostRef} className="h-full w-full" />
-      <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-border bg-panel/80 px-3 py-2 text-xs text-muted-foreground shadow-xl backdrop-blur">
-        {viewMode === "perspective"
-          ? "鼠标拖拽旋转 · 滚轮缩放 · 点击选择零件"
-          : "三视图模式 · 拖拽框选完全框入的模型 · Delete 批量删除"}
-      </div>
+      {!previewMode ? (
+        <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-border bg-panel/80 px-3 py-2 text-xs text-muted-foreground shadow-xl backdrop-blur">
+          {viewMode === "perspective"
+            ? "点击选择 · Shift 多选 · 拖拽箭头移动 · Ctrl+Z/Y 撤销重做"
+            : "三视图模式 · 滚轮缩放 · 右键/中键平移 · 左键框选 · Delete 批量删除"}
+        </div>
+      ) : null}
       {isLoading ? (
         <div className="absolute inset-0 grid place-items-center bg-background/35 backdrop-blur-sm">
           <div className="rounded-md border border-border bg-panel px-4 py-3 text-sm shadow-xl">

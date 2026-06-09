@@ -79,7 +79,7 @@ export function PartsTree({
       {tree ? (
         <div
           ref={viewportRef}
-          className="min-h-0 flex-1 overflow-auto p-2"
+          className="editor-scrollbar min-h-0 flex-1 overflow-auto p-2"
           onScroll={(event) => {
             setScrollTop(event.currentTarget.scrollTop);
             setViewportHeight(event.currentTarget.clientHeight);

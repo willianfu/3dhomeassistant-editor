@@ -6,6 +6,7 @@ import {
   getObjectMetadata,
   shouldHandleDeleteKey,
 } from "./model-tree";
+import { markModelGroup } from "./model-identity";
 
 function createMesh(name = "") {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
@@ -42,6 +43,23 @@ describe("model-tree", () => {
     const flat = flattenModelTree(buildModelTree(root));
 
     expect(flat.map((node) => node.name)).toEqual(["Root", "Child"]);
+  });
+
+  it("treats marked model groups as atomic tree nodes", () => {
+    const root = new THREE.Group();
+    root.name = "Root";
+    const lamp = new THREE.Group();
+    lamp.name = "Lamp";
+    markModelGroup(lamp);
+    lamp.add(createMesh("Bulb"), createMesh("Shell"));
+    root.add(lamp);
+
+    const tree = buildModelTree(root);
+
+    expect(tree.children[0].name).toBe("Lamp");
+    expect(tree.children[0].childCount).toBe(2);
+    expect(tree.children[0].children).toEqual([]);
+    expect(flattenModelTree(tree).map((node) => node.name)).toEqual(["Root", "Lamp"]);
   });
 
   it("computes metadata with nested mesh counts", () => {
