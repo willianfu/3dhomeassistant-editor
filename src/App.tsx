@@ -13,6 +13,8 @@ import {
   type HaFloatingPanelState,
 } from "./lib/ha-floating-panels";
 import { addHaBinding, getBoundEntityIds } from "./lib/ha-bindings";
+import { cn } from "./lib/utils";
+import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
 import {
   buildModelTree,
   getObjectMetadata,
@@ -106,6 +108,7 @@ export default function App() {
   const ha = useHomeAssistant();
   const [environment, setEnvironment] =
     useState<EnvironmentConfig>(defaultEnvironment);
+  const [weather, setWeather] = useState<WeatherConfig>(defaultWeather);
 
   const refreshTree = useCallback(() => {
     const root = editor?.getRoot();
@@ -190,6 +193,10 @@ export default function App() {
   useEffect(() => {
     editor?.setEnvironment(environment);
   }, [editor, environment]);
+
+  useEffect(() => {
+    editor?.setWeather(weather);
+  }, [editor, weather]);
 
   useEffect(() => {
     editor?.setViewMode(viewMode);
@@ -415,6 +422,7 @@ export default function App() {
         historyState={historyState}
         haStatus={ha.status}
         haStatusMessage={ha.statusMessage}
+        weather={weather}
         onUploadClick={handleUploadClick}
         onExport={handleExport}
         onTogglePreview={() => setPreviewMode((value) => !value)}
@@ -432,6 +440,7 @@ export default function App() {
           setViewMode(mode);
           editor?.setViewMode(mode);
         }}
+        onWeatherChange={setWeather}
         onToggleLeft={() => setLeftCollapsed((value) => !value)}
         onToggleRight={() => setRightCollapsed((value) => !value)}
       />
@@ -443,7 +452,15 @@ export default function App() {
         onChange={handleFileChange}
       />
       <div className="flex min-h-0 flex-1">
-        {!leftCollapsed && !previewMode ? (
+        <div
+          aria-hidden={leftCollapsed || previewMode}
+          className={cn(
+            "flex min-h-0 shrink-0 overflow-hidden transition-[width,opacity,transform] duration-300 ease-out motion-reduce:transition-none",
+            leftCollapsed || previewMode
+              ? "w-0 -translate-x-3 opacity-0 pointer-events-none"
+              : "w-[300px] translate-x-0 opacity-100",
+          )}
+        >
           <PartsTree
             tree={tree}
             selectedIds={selectedIds}
@@ -451,7 +468,7 @@ export default function App() {
             onUploadClick={handleUploadClick}
             onLoadSample={handleLoadSample}
           />
-        ) : null}
+        </div>
         <Viewport
           onReady={setEditor}
           onSelectionChange={setSelectedIds}
@@ -463,7 +480,15 @@ export default function App() {
           viewMode={viewMode}
           previewMode={previewMode}
         />
-        {!rightCollapsed && !previewMode ? (
+        <div
+          aria-hidden={rightCollapsed || previewMode}
+          className={cn(
+            "flex min-h-0 shrink-0 overflow-hidden transition-[width,opacity,transform] duration-300 ease-out motion-reduce:transition-none",
+            rightCollapsed || previewMode
+              ? "w-0 translate-x-3 opacity-0 pointer-events-none"
+              : "w-[340px] translate-x-0 opacity-100",
+          )}
+        >
           <RightInspector
             environment={environment}
             metadata={metadata}
@@ -483,7 +508,7 @@ export default function App() {
             onGroupSelected={handleGroupSelected}
             onDeleteSelected={handleDeleteSelected}
           />
-        ) : null}
+        </div>
         {!previewMode ? (
           <HaBindingDialog
             open={bindingDialogOpen}

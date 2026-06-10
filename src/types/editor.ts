@@ -41,9 +41,11 @@ export type SelectionTransformInfo = {
 };
 
 export type EnvironmentConfig = {
+  timeOfDay: number;
   ambientIntensity: number;
   directionalIntensity: number;
   directionalPosition: Vector3Values;
+  colorTemperatureKelvin: number;
   exposure: number;
   gridVisible: boolean;
   wallOpacity: number;
@@ -52,10 +54,12 @@ export type EnvironmentConfig = {
 export type ViewMode = "perspective" | "top" | "front" | "side";
 
 export const defaultEnvironment: EnvironmentConfig = {
-  ambientIntensity: 0.68,
-  directionalIntensity: 1.1,
-  directionalPosition: { x: -6, y: 10, z: 5 },
-  exposure: 1.05,
+  timeOfDay: 12,
+  ambientIntensity: 0.78,
+  directionalIntensity: 1.45,
+  directionalPosition: { x: 0, y: 11, z: 7.5 },
+  colorTemperatureKelvin: 6200,
+  exposure: 1.18,
   gridVisible: true,
   wallOpacity: 0.28,
 };

@@ -1,3 +1,8 @@
+<div align="center">
+  <img src="./docs/images/logo.png" width="200" />
+</div>
+![GitHub stars](https://img.shields.io/github/stars/willianfu/3dhomeassistant-editor?style=social)![GitHub forks](https://img.shields.io/github/forks/willianfu/3dhomeassistant-editor?style=social)[![star](https://gitee.com/willianfu/3dhomeassistant-editor/badge/star.svg?theme=dark)](https://gitee.com/willianfu/3dhomeassistant-editor/stargazers) [![fork](https://gitee.com/willianfu/3dhomeassistant-editor/badge/fork.svg?theme=dark)](https://gitee.com/willianfu/3dhomeassistant-editor/members) <img src="https://img.shields.io/badge/release-v0.0.1-brightgreen.svg"> <img src="https://shields.io/badge/license-AGPL3.0-blue">
+
 # 3DHome Editor
 
 基于 Web 技术的 3D 智能家居模型编辑器。

@@ -1,22 +1,33 @@
 import {
+  Cloud,
+  CloudRain,
   Download,
   Eye,
   EyeOff,
+  CloudSun,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Redo2,
   SquareDashedMousePointer,
+  Sun,
   Undo2,
   Upload,
-  Wifi,
-  WifiOff,
+  Wind,
+  Zap,
 } from "lucide-react";
 import type { EditorHistoryState } from "../../lib/editor-history";
+import { cn } from "../../lib/utils";
+import {
+  WEATHER_OPTIONS,
+  type WeatherConfig,
+  type WeatherMode,
+} from "../../lib/weather-presets";
 import type { HaConnectionStatus } from "../../types/ha";
 import type { ViewMode } from "../../types/editor";
 import { Button } from "../ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import {
   Tooltip,
   TooltipContent,
@@ -34,11 +45,13 @@ type TopToolbarProps = {
   historyState: EditorHistoryState;
   haStatus: HaConnectionStatus;
   haStatusMessage: string;
+  weather: WeatherConfig;
   onUploadClick: () => void;
   onExport: () => void;
   onTogglePreview: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  onWeatherChange: (weather: WeatherConfig) => void;
   onViewModeChange: (mode: ViewMode) => void;
   onToggleLeft: () => void;
   onToggleRight: () => void;
@@ -89,12 +102,90 @@ function HaStatus({
 
   return (
     <div
-      className="flex h-8 items-center gap-1 rounded-md border border-border bg-background/60 px-2 text-xs text-muted-foreground"
+      className="flex h-8 shrink-0 items-center gap-2 rounded-md px-2 text-xs text-muted-foreground"
       title={message || status}
     >
-      {status === "connected" ? <Wifi size={14} /> : <WifiOff size={14} />}
+      <span
+        className={cn(
+          "size-2 rounded-full shadow-[0_0_10px_currentColor]",
+          status === "connected" ? "bg-emerald-400 text-emerald-400" : "bg-destructive text-destructive",
+        )}
+      />
       HA {label}
     </div>
+  );
+}
+
+function getWeatherIcon(mode: WeatherMode) {
+  if (mode === "sunny") {
+    return Sun;
+  }
+  if (mode === "cloudy" || mode === "overcast") {
+    return Cloud;
+  }
+  if (mode.startsWith("rain")) {
+    return CloudRain;
+  }
+  if (mode === "wind") {
+    return Wind;
+  }
+  if (mode === "lightning") {
+    return Zap;
+  }
+  return CloudSun;
+}
+
+function WeatherMenu({
+  weather,
+  onChange,
+}: {
+  weather: WeatherConfig;
+  onChange: (weather: WeatherConfig) => void;
+}) {
+  const current = WEATHER_OPTIONS.find((option) => option.mode === weather.mode) ?? WEATHER_OPTIONS[0];
+  const CurrentIcon = getWeatherIcon(current.mode);
+
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label="天气模拟">
+              <CurrentIcon />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>天气模拟：{current.label}</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="end" className="w-[280px]">
+        <div className="mb-3">
+          <div className="text-sm font-medium text-foreground">天气模拟</div>
+          <div className="text-xs text-muted-foreground">选择后会实时作用到 3D 渲染器</div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {WEATHER_OPTIONS.map((option) => {
+            const Icon = getWeatherIcon(option.mode);
+            return (
+              <Button
+                key={option.mode}
+                type="button"
+                variant={weather.mode === option.mode ? "default" : "outline"}
+                className="h-auto justify-start px-2 py-2"
+                onClick={() => onChange({ mode: option.mode })}
+              >
+                <Icon data-icon="inline-start" />
+                <span className="grid min-w-0 text-left">
+                  <span className="truncate text-xs">{option.label}</span>
+                  <span className="truncate text-[10px] opacity-70">
+                    {option.description}
+                  </span>
+                </span>
+              </Button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -108,11 +199,13 @@ export function TopToolbar({
   historyState,
   haStatus,
   haStatusMessage,
+  weather,
   onUploadClick,
   onExport,
   onTogglePreview,
   onUndo,
   onRedo,
+  onWeatherChange,
   onViewModeChange,
   onToggleLeft,
   onToggleRight,
@@ -126,11 +219,7 @@ export function TopToolbar({
               label={leftCollapsed ? "展开零件库" : "折叠零件库"}
               onClick={onToggleLeft}
             >
-              {leftCollapsed ? (
-                <PanelLeftOpen size={17} />
-              ) : (
-                <PanelLeftClose size={17} />
-              )}
+              {leftCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
             </IconButton>
           ) : null}
           <div className="min-w-0 px-2">
@@ -146,6 +235,7 @@ export function TopToolbar({
 
         <div className="flex items-center gap-2">
           <HaStatus status={haStatus} message={haStatusMessage} />
+          <WeatherMenu weather={weather} onChange={onWeatherChange} />
           {previewMode ? (
             <Button
               variant="default"
@@ -153,7 +243,7 @@ export function TopToolbar({
               onClick={onTogglePreview}
               disabled={!hasModel}
             >
-              <EyeOff size={15} />
+              <EyeOff data-icon="inline-start" />
               返回编辑
             </Button>
           ) : (
@@ -164,14 +254,14 @@ export function TopToolbar({
                   onClick={onUndo}
                   disabled={!historyState.canUndo}
                 >
-                  <Undo2 size={15} />
+                  <Undo2 />
                 </IconButton>
                 <IconButton
                   label="重做 Ctrl+Y"
                   onClick={onRedo}
                   disabled={!historyState.canRedo}
                 >
-                  <Redo2 size={15} />
+                  <Redo2 />
                 </IconButton>
               </div>
               <div className="flex h-8 items-center rounded-md border border-border bg-background/60 p-0.5">
@@ -190,7 +280,7 @@ export function TopToolbar({
                     disabled={!hasModel && mode !== "perspective"}
                   >
                     {mode !== "perspective" ? (
-                      <SquareDashedMousePointer size={13} />
+                      <SquareDashedMousePointer data-icon="inline-start" />
                     ) : null}
                     {label}
                   </Button>
@@ -202,7 +292,7 @@ export function TopToolbar({
                 onClick={onUploadClick}
                 disabled={isLoading}
               >
-                <Upload size={15} />
+                <Upload data-icon="inline-start" />
                 上传
               </Button>
               <Button
@@ -211,22 +301,18 @@ export function TopToolbar({
                 onClick={onTogglePreview}
                 disabled={!hasModel}
               >
-                <Eye size={15} />
+                <Eye data-icon="inline-start" />
                 预览
               </Button>
               <Button size="sm" onClick={onExport} disabled={!hasModel || isLoading}>
-                <Download size={15} />
+                <Download data-icon="inline-start" />
                 导出
               </Button>
               <IconButton
                 label={rightCollapsed ? "展开配置栏" : "折叠配置栏"}
                 onClick={onToggleRight}
               >
-                {rightCollapsed ? (
-                  <PanelRightOpen size={17} />
-                ) : (
-                  <PanelRightClose size={17} />
-                )}
+                {rightCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
               </IconButton>
             </>
           )}

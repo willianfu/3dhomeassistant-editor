@@ -5,6 +5,8 @@ import {
 } from "../../lib/ha-capabilities/light";
 import type { HaLightCapabilityConfig, HaEntityState } from "../../types/ha";
 import { Button } from "../ui/button";
+import { Label } from "../ui/label";
+import { Slider } from "../ui/slider";
 
 type HaLightControlProps = {
   entityIds: string[];
@@ -44,10 +46,10 @@ export function HaLightControl({
   );
 
   return (
-    <div className="grid min-w-0 gap-3 rounded-md border border-amber-400/30 bg-amber-400/10 p-2">
+    <div className="grid min-w-0 gap-3 rounded-md border border-border bg-background/60 p-2">
       <div className="flex min-w-0 items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <Lightbulb size={14} className="shrink-0 text-amber-300" />
+          <Lightbulb className="shrink-0 text-primary" />
           <div className="min-w-0 truncate text-xs font-medium">灯光</div>
         </div>
         <Button
@@ -62,19 +64,16 @@ export function HaLightControl({
         </Button>
       </div>
       {brightnessEntityId ? (
-        <label className="grid min-w-0 gap-1 text-[10px] text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Zap size={12} />
+        <div className="grid min-w-0 gap-2">
+          <Label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            <Zap />
             亮度 {brightnessValue}
-          </span>
-          <input
-            type="range"
-            className="w-full min-w-0 accent-amber-300"
+          </Label>
+          <Slider
             min={0}
             max={currentConfig.maxBrightness}
-            value={brightnessValue}
-            onChange={(event) => {
-              const value = Number(event.target.value);
+            value={[brightnessValue]}
+            onValueChange={([value]) => {
               if (brightnessEntityId === resolved.sourceEntityId) {
                 onCall(brightnessEntityId, "turn_on", { brightness: value });
               } else {
@@ -82,23 +81,20 @@ export function HaLightControl({
               }
             }}
           />
-        </label>
+        </div>
       ) : null}
       {colorTemperatureEntityId ? (
-        <label className="grid min-w-0 gap-1 text-[10px] text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Thermometer size={12} />
+        <div className="grid min-w-0 gap-2">
+          <Label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            <Thermometer />
             色温 {resolved.colorTemperatureKelvin}K
-          </span>
-          <input
-            type="range"
-            className="w-full min-w-0 accent-amber-300"
+          </Label>
+          <Slider
             min={1800}
             max={6500}
             step={50}
-            value={resolved.colorTemperatureKelvin}
-            onChange={(event) => {
-              const value = Number(event.target.value);
+            value={[resolved.colorTemperatureKelvin]}
+            onValueChange={([value]) => {
               if (colorTemperatureEntityId === resolved.sourceEntityId) {
                 onCall(colorTemperatureEntityId, "turn_on", {
                   color_temp_kelvin: value,
@@ -108,7 +104,7 @@ export function HaLightControl({
               }
             }}
           />
-        </label>
+        </div>
       ) : null}
     </div>
   );

@@ -3,7 +3,10 @@ import { X } from "lucide-react";
 import { getBoundEntityIds } from "../../lib/ha-bindings";
 import { placeFloatingPanel } from "../../lib/floating-panel-placement";
 import type { HaBinding, HaEntityState, HaLightCapabilityConfig } from "../../types/ha";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { ScrollArea } from "../ui/scroll-area";
 import { HaEntityControl } from "./HaEntityControl";
 import { HaLightControl } from "./HaLightControl";
 
@@ -63,39 +66,45 @@ export function HaFloatingPanel({
   });
 
   return (
-    <div
+    <Card
       ref={panelRef}
-      className="pointer-events-auto fixed z-30 w-[300px] max-w-[calc(100vw-24px)] overflow-hidden rounded-md border border-border bg-panel/82 p-3 shadow-2xl backdrop-blur-md"
+      className="pointer-events-auto fixed z-30 w-[300px] max-w-[calc(100vw-24px)] overflow-hidden bg-panel/86 shadow-2xl backdrop-blur-md"
       style={{
         left: `${position.left}px`,
         top: `${position.top}px`,
       }}
     >
-      <div className="mb-2 flex items-center justify-between gap-3">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 p-3 pb-2">
         <div className="min-w-0">
-          <div className="truncate text-xs font-semibold">设备控制</div>
-          <div className="text-[10px] text-muted-foreground">{entityIds.length} 个实体</div>
+          <CardTitle className="truncate text-xs">设备控制</CardTitle>
+          <Badge variant="secondary" className="mt-1">
+            {entityIds.length} 个实体
+          </Badge>
         </div>
         <Button size="icon" variant="ghost" className="shrink-0" onClick={onClose}>
-          <X size={14} />
+          <X data-icon="icon" />
         </Button>
-      </div>
-      <div className="editor-scrollbar grid max-h-[320px] min-w-0 gap-2 overflow-x-hidden overflow-y-auto pr-1">
-        <HaLightControl
-          entityIds={entityIds}
-          config={lightCapability}
-          states={states}
-          onCall={onCall}
-        />
-        {entityIds.map((entityId) => (
-          <HaEntityControl
-            key={entityId}
-            entityId={entityId}
-            state={states[entityId]}
-            onCall={onCall}
-          />
-        ))}
-      </div>
-    </div>
+      </CardHeader>
+      <CardContent className="p-3 pt-0">
+        <ScrollArea className="max-h-[360px] pr-2">
+          <div className="grid min-w-0 gap-2">
+            <HaLightControl
+              entityIds={entityIds}
+              config={lightCapability}
+              states={states}
+              onCall={onCall}
+            />
+            {entityIds.map((entityId) => (
+              <HaEntityControl
+                key={entityId}
+                entityId={entityId}
+                state={states[entityId]}
+                onCall={onCall}
+              />
+            ))}
+          </div>
+        </ScrollArea>
+      </CardContent>
+    </Card>
   );
 }

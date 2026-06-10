@@ -6,6 +6,30 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import type { EnvironmentConfig, Vector3Values, ViewMode } from "../types/editor";
+import {
+  defaultWeather,
+  getWeatherPreset,
+  resolveWeatherCloudAltitude,
+  resolveWeatherCloudParticleCount,
+  resolveWeatherCloudScale,
+  resolveWeatherCloudWrapPadding,
+  resolveWeatherEffectSpan,
+  resolveWeatherFogDensity,
+  resolveWeatherLightningRadius,
+  resolveWeatherLightningCooldownFrames,
+  resolveWeatherLightningStrikePosition,
+  resolveWeatherParticleCount,
+  resolveWeatherRainDropLength,
+  resolveWeatherRainParticleCount,
+  resolveWeatherRainSpeed,
+  resolveWeatherRainTop,
+  resolveWeatherScale,
+  resolveWeatherSkyPadding,
+  resolveWeatherSunOpacity,
+  resolveWeatherSunScale,
+  type WeatherConfig,
+  type WeatherPreset,
+} from "./weather-presets";
 import type {
   HaBinding,
   HaEntityState,
@@ -55,6 +79,43 @@ type HaLightRig = {
   type: HaLightCapabilityConfig["lightType"];
   group: THREE.Group;
   light: HaLightObject;
+};
+
+type WeatherLineEffect = {
+  object: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  positions: Float32Array;
+  count: number;
+  kind: "rain" | "wind";
+  speed: number;
+  drift: number;
+  length: number;
+  bounds: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    minZ: number;
+    maxZ: number;
+  };
+};
+
+type WeatherCloud = {
+  sprite: THREE.Sprite;
+  speed: number;
+  minX: number;
+  maxX: number;
+};
+
+type WeatherBounds = {
+  center: THREE.Vector3;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  modelTop: number;
+  skyPadding: number;
+  minZ: number;
+  maxZ: number;
 };
 
 function colorTemperatureToColor(kelvin: number) {
@@ -113,6 +174,19 @@ export class ThreeEditor {
   private originalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private haLights = new Map<string, HaLightRig>();
   private wallOriginalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
+  private weatherConfig: WeatherConfig = defaultWeather;
+  private weatherGroup = new THREE.Group();
+  private weatherRain: WeatherLineEffect | null = null;
+  private weatherWind: WeatherLineEffect | null = null;
+  private weatherClouds: WeatherCloud[] = [];
+  private weatherLightningLight: THREE.PointLight | null = null;
+  private weatherLightningBolt: THREE.Mesh<THREE.TubeGeometry, THREE.MeshBasicMaterial> | null =
+    null;
+  private weatherLightningSkyFlash: THREE.Sprite | null = null;
+  private weatherLightningFlash = 0;
+  private weatherLightningBurstFrames = 0;
+  private weatherLightningCooldownFrames = 0;
+  private lastFrameTime = 0;
   private selectedIds = new Set<string>();
   private selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x29d3c4);
   private multiSelectionGroup = new THREE.Group();
@@ -191,6 +265,8 @@ export class ThreeEditor {
     this.directional.shadow.camera.bottom = -12;
     this.directional.shadow.bias = -0.0001;
     this.scene.add(this.ambient, this.directional);
+    this.weatherGroup.name = "weather simulation";
+    this.scene.add(this.weatherGroup);
 
     this.selectionBox.visible = false;
     this.selectionBox.material.depthTest = false;
@@ -224,6 +300,7 @@ export class ThreeEditor {
     );
     window.removeEventListener("pointerup", this.handlePointerUp);
     this.restoreWallTransparency();
+    this.clearWeatherEffects();
     if (this.modelRoot) {
       disposeObjectTree(this.modelRoot);
     }
@@ -273,6 +350,7 @@ export class ThreeEditor {
       this.rebuildObjectMap();
       this.frameObject(root);
       this.setViewMode(this.viewMode);
+      this.rebuildWeatherEffects();
       this.options.onModelChange?.();
       return root;
     } finally {
@@ -298,6 +376,7 @@ export class ThreeEditor {
     this.rebuildObjectMap();
     this.frameObject(root);
     this.setViewMode(this.viewMode);
+    this.rebuildWeatherEffects();
     this.options.onModelChange?.();
     this.options.onLoadProgress?.(1);
     return root;
@@ -713,18 +792,23 @@ export class ThreeEditor {
 
   setEnvironment(config: EnvironmentConfig) {
     this.environmentConfig = config;
-    this.ambient.intensity = config.ambientIntensity;
-    this.directional.intensity = config.directionalIntensity;
     this.directional.position.set(
       config.directionalPosition.x,
       config.directionalPosition.y,
       config.directionalPosition.z,
     );
     this.grid.visible = config.gridVisible;
-    if (this.renderer) {
-      this.renderer.toneMappingExposure = config.exposure;
-    }
+    this.applyWeatherAtmosphere();
     this.updateWallTransparency();
+  }
+
+  setWeather(config: WeatherConfig) {
+    if (this.weatherConfig.mode === config.mode) {
+      return;
+    }
+    this.weatherConfig = config;
+    this.rebuildWeatherEffects();
+    this.applyWeatherAtmosphere();
   }
 
   setPreviewMode(enabled: boolean) {
@@ -805,6 +889,7 @@ export class ThreeEditor {
     }
     this.modelRoot = null;
     this.objectMap.clear();
+    this.rebuildWeatherEffects();
     this.options.onModelChange?.();
   }
 
@@ -1019,6 +1104,7 @@ export class ThreeEditor {
     }
     this.resizeIfNeeded();
     this.controls?.update();
+    this.updateWeatherEffects();
     this.renderer.render(this.scene, this.getActiveCamera());
     this.animationFrame = requestAnimationFrame(this.animate);
   };
@@ -1315,6 +1401,560 @@ export class ThreeEditor {
 
   private materialList(material: THREE.Material | THREE.Material[]) {
     return Array.isArray(material) ? material : [material];
+  }
+
+  private applyWeatherAtmosphere() {
+    const preset = getWeatherPreset(this.weatherConfig.mode);
+    const environmentColor = colorTemperatureToColor(
+      this.environmentConfig.colorTemperatureKelvin,
+    );
+    this.ambient.color.copy(environmentColor);
+    this.directional.color.copy(environmentColor);
+    this.ambient.intensity =
+      this.environmentConfig.ambientIntensity * preset.lighting.ambientMultiplier;
+    this.directional.intensity =
+      this.environmentConfig.directionalIntensity *
+      preset.lighting.directionalMultiplier;
+    this.scene.background = new THREE.Color(preset.lighting.background);
+    const fogDensity = resolveWeatherFogDensity(
+      preset.lighting.fogDensity,
+      this.getWeatherSceneSpan(),
+    );
+    this.scene.fog =
+      fogDensity > 0
+        ? new THREE.FogExp2(preset.lighting.background, fogDensity)
+        : null;
+    if (this.renderer) {
+      this.renderer.toneMappingExposure = THREE.MathUtils.clamp(
+        this.environmentConfig.exposure + preset.lighting.exposureOffset,
+        0.25,
+        2.6,
+      );
+    }
+  }
+
+  private rebuildWeatherEffects() {
+    this.clearWeatherEffects();
+    const preset = getWeatherPreset(this.weatherConfig.mode);
+    if (preset.mode === "none") {
+      return;
+    }
+    const sceneSpan = this.getWeatherSceneSpan();
+    const weatherScale = resolveWeatherScale(sceneSpan);
+    this.addWeatherClouds(preset, sceneSpan, weatherScale);
+    if (preset.mode === "sunny") {
+      this.addSunnyGlow();
+    }
+    if (preset.rain.count > 0) {
+      this.weatherRain = this.createLineWeatherEffect({
+        kind: "rain",
+        count: resolveWeatherRainParticleCount(preset.rain.count, sceneSpan),
+        speed: resolveWeatherRainSpeed(preset.rain.speed, sceneSpan),
+        drift: preset.rain.windDrift * weatherScale,
+        opacity: preset.rain.opacity,
+        color: 0xb8e3ff,
+        length: resolveWeatherRainDropLength(
+          preset.mode === "rain-light" ? 0.42 : 0.7,
+          sceneSpan,
+        ),
+      });
+      this.weatherGroup.add(this.weatherRain.object);
+    }
+    if (preset.wind.count > 0) {
+      this.weatherWind = this.createLineWeatherEffect({
+        kind: "wind",
+        count: resolveWeatherParticleCount(preset.wind.count, sceneSpan, 4),
+        speed: preset.wind.speed * weatherScale,
+        drift: 0,
+        opacity: preset.wind.opacity,
+        color: 0xd7f3ff,
+        length: 1.8 * weatherScale,
+      });
+      this.weatherGroup.add(this.weatherWind.object);
+    }
+    if (preset.lightning.enabled) {
+      this.addLightningEffect();
+      this.triggerLightningBurst(preset);
+    }
+  }
+
+  private clearWeatherEffects() {
+    for (const child of [...this.weatherGroup.children]) {
+      this.weatherGroup.remove(child);
+      disposeObjectTree(child);
+    }
+    this.weatherRain = null;
+    this.weatherWind = null;
+    this.weatherClouds = [];
+    this.weatherLightningLight = null;
+    this.weatherLightningBolt = null;
+    this.weatherLightningSkyFlash = null;
+    this.weatherLightningFlash = 0;
+    this.weatherLightningBurstFrames = 0;
+    this.weatherLightningCooldownFrames = 0;
+  }
+
+  private getWeatherSceneSpan() {
+    if (!this.modelRoot) {
+      return 20;
+    }
+    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    if (box.isEmpty()) {
+      return 20;
+    }
+    const size = box.getSize(new THREE.Vector3());
+    return Math.max(size.x, size.y, size.z, 1);
+  }
+
+  private getWeatherBounds() {
+    const box = this.modelRoot
+      ? new THREE.Box3().setFromObject(this.modelRoot)
+      : new THREE.Box3(
+          new THREE.Vector3(-6, 0, -6),
+          new THREE.Vector3(6, 4, 6),
+        );
+    if (box.isEmpty()) {
+      box.set(
+        new THREE.Vector3(-6, 0, -6),
+        new THREE.Vector3(6, 4, 6),
+      );
+    }
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const sceneSpan = Math.max(size.x, size.z, 10);
+    const span = resolveWeatherEffectSpan(sceneSpan);
+    const skyPadding = resolveWeatherSkyPadding(sceneSpan, size.y);
+    return {
+      center,
+      minX: center.x - span / 2,
+      maxX: center.x + span / 2,
+      minY: box.min.y,
+      maxY: box.max.y + skyPadding,
+      modelTop: box.max.y,
+      skyPadding,
+      minZ: center.z - span / 2,
+      maxZ: center.z + span / 2,
+    };
+  }
+
+  private createLineWeatherEffect({
+    kind,
+    count,
+    speed,
+    drift,
+    opacity,
+    color,
+    length,
+  }: {
+    kind: "rain" | "wind";
+    count: number;
+    speed: number;
+    drift: number;
+    opacity: number;
+    color: number;
+    length: number;
+  }): WeatherLineEffect {
+    const weatherBounds = this.getWeatherBounds();
+    const bounds = {
+      minX: weatherBounds.minX,
+      maxX: weatherBounds.maxX,
+      minY: weatherBounds.minY,
+      maxY:
+        kind === "rain"
+          ? resolveWeatherRainTop(weatherBounds.modelTop, weatherBounds.skyPadding)
+          : weatherBounds.maxY,
+      minZ: weatherBounds.minZ,
+      maxZ: weatherBounds.maxZ,
+    };
+    const positions = new Float32Array(count * 6);
+    for (let index = 0; index < count; index += 1) {
+      const offset = index * 6;
+      const x = THREE.MathUtils.lerp(bounds.minX, bounds.maxX, Math.random());
+      const y = THREE.MathUtils.lerp(bounds.minY, bounds.maxY, Math.random());
+      const z = THREE.MathUtils.lerp(bounds.minZ, bounds.maxZ, Math.random());
+      positions[offset] = x;
+      positions[offset + 1] = y;
+      positions[offset + 2] = z;
+      positions[offset + 3] = kind === "rain" ? x + drift * 8 : x + length;
+      positions[offset + 4] = kind === "rain" ? y + length : y + 0.05;
+      positions[offset + 5] = kind === "rain" ? z : z + 0.08;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+    });
+    const object = new THREE.LineSegments(geometry, material);
+    object.frustumCulled = false;
+    object.name = kind === "rain" ? "weather rain" : "weather wind";
+    return { object, positions, count, kind, speed, drift, length, bounds };
+  }
+
+  private addWeatherClouds(
+    preset: WeatherPreset,
+    sceneSpan: number,
+    weatherScale: number,
+  ) {
+    if (preset.cloud.count === 0) {
+      return;
+    }
+    const texture = this.createCloudTexture();
+    const bounds = this.getWeatherBounds();
+    const wrapPadding = resolveWeatherCloudWrapPadding(sceneSpan);
+    const count = resolveWeatherCloudParticleCount(
+      preset.mode,
+      preset.cloud.count,
+      sceneSpan,
+      2.5,
+    );
+    for (let index = 0; index < count; index += 1) {
+      const material = new THREE.SpriteMaterial({
+        map: texture,
+        color: preset.mode === "sunny" ? 0xffffff : 0xb8c4cf,
+        transparent: true,
+        opacity: preset.cloud.opacity * THREE.MathUtils.lerp(0.72, 1.12, Math.random()),
+        depthWrite: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      const scale = resolveWeatherCloudScale(
+        THREE.MathUtils.lerp(3.8, 8.5, Math.random()) * weatherScale,
+      );
+      sprite.scale.set(scale * 1.8, scale * 0.58, 1);
+      sprite.position.set(
+        THREE.MathUtils.lerp(bounds.minX, bounds.maxX, Math.random()),
+        resolveWeatherCloudAltitude(bounds.modelTop, bounds.skyPadding, Math.random()),
+        THREE.MathUtils.lerp(bounds.minZ, bounds.maxZ, Math.random()),
+      );
+      sprite.renderOrder = -1;
+      this.weatherGroup.add(sprite);
+      this.weatherClouds.push({
+        sprite,
+        speed: preset.cloud.speed * THREE.MathUtils.lerp(0.5, 1.4, Math.random()),
+        minX: bounds.minX - wrapPadding,
+        maxX: bounds.maxX + wrapPadding,
+      });
+    }
+  }
+
+  private createCloudTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 96;
+    const context = canvas.getContext("2d");
+    if (context) {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      const circles = [
+        [58, 54, 34],
+        [96, 42, 46],
+        [142, 52, 38],
+        [184, 48, 30],
+      ];
+      for (const [x, y, radius] of circles) {
+        const gradient = context.createRadialGradient(x, y, 4, x, y, radius);
+        gradient.addColorStop(0, "rgba(255,255,255,0.92)");
+        gradient.addColorStop(1, "rgba(255,255,255,0)");
+        context.fillStyle = gradient;
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  private addSunnyGlow() {
+    const texture = this.createSunTexture();
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      color: 0xfff4c2,
+      transparent: true,
+      opacity: resolveWeatherSunOpacity(0.58),
+      depthWrite: false,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(material);
+    const bounds = this.getWeatherBounds();
+    sprite.position.set(bounds.maxX - 2, bounds.maxY - 1, bounds.minZ + 2);
+    const scale = resolveWeatherSunScale(5.5, this.getWeatherSceneSpan());
+    sprite.scale.set(scale, scale, 1);
+    sprite.renderOrder = -5;
+    this.weatherGroup.add(sprite);
+  }
+
+  private createSunTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context) {
+      const gradient = context.createRadialGradient(64, 64, 6, 64, 64, 64);
+      gradient.addColorStop(0, "rgba(255,255,230,1)");
+      gradient.addColorStop(0.24, "rgba(255,218,120,0.9)");
+      gradient.addColorStop(1, "rgba(255,190,80,0)");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, 128, 128);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  private addLightningEffect() {
+    const bounds = this.getWeatherBounds();
+    const span = Math.max(bounds.maxX - bounds.minX, bounds.maxZ - bounds.minZ, 24);
+    const sceneSpan = this.getWeatherSceneSpan();
+    const weatherScale = resolveWeatherScale(sceneSpan);
+    const light = new THREE.PointLight(0xdcefff, 0, Math.max(span * 2.4, 120));
+    light.position.set(bounds.center.x, bounds.maxY - 2, bounds.center.z);
+    light.castShadow = false;
+    this.weatherLightningLight = light;
+    this.weatherGroup.add(light);
+    this.addLightningSkyFlash(bounds, span);
+
+    const points: THREE.Vector3[] = [];
+    const startX =
+      bounds.center.x + THREE.MathUtils.lerp(-3, 3, Math.random()) * weatherScale;
+    const startZ =
+      bounds.center.z + THREE.MathUtils.lerp(-3, 3, Math.random()) * weatherScale;
+    for (let index = 0; index < 8; index += 1) {
+      const ratio = index / 7;
+      points.push(
+        new THREE.Vector3(
+          startX + THREE.MathUtils.lerp(-0.8, 0.8, Math.random()) * weatherScale,
+          THREE.MathUtils.lerp(
+            bounds.maxY - weatherScale,
+            bounds.minY + 2 * weatherScale,
+            ratio,
+          ),
+          startZ + THREE.MathUtils.lerp(-0.8, 0.8, Math.random()) * weatherScale,
+        ),
+      );
+    }
+    const geometry = this.createLightningGeometry(points, sceneSpan);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xe8f5ff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.weatherLightningBolt = new THREE.Mesh(geometry, material);
+    this.weatherLightningBolt.name = "weather lightning";
+    this.weatherLightningBolt.frustumCulled = false;
+    this.weatherGroup.add(this.weatherLightningBolt);
+  }
+
+  private createLightningGeometry(points: THREE.Vector3[], sceneSpan: number) {
+    const curve = new THREE.CatmullRomCurve3(points);
+    const radius = resolveWeatherLightningRadius(sceneSpan);
+    return new THREE.TubeGeometry(curve, Math.max(points.length * 5, 32), radius, 8, false);
+  }
+
+  private addLightningSkyFlash(bounds: WeatherBounds, span: number) {
+    const texture = this.createLightningFlashTexture();
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      color: 0xcfe9ff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.position.set(bounds.center.x, bounds.maxY - 1, bounds.center.z);
+    sprite.scale.set(span * 1.65, span * 0.9, 1);
+    sprite.renderOrder = 20;
+    this.weatherLightningSkyFlash = sprite;
+    this.weatherGroup.add(sprite);
+  }
+
+  private createLightningFlashTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 160;
+    const context = canvas.getContext("2d");
+    if (context) {
+      const gradient = context.createRadialGradient(128, 58, 8, 128, 58, 128);
+      gradient.addColorStop(0, "rgba(255,255,255,1)");
+      gradient.addColorStop(0.28, "rgba(160,215,255,0.72)");
+      gradient.addColorStop(1, "rgba(90,150,255,0)");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  private updateWeatherEffects() {
+    const now = performance.now();
+    const delta = this.lastFrameTime > 0 ? Math.min((now - this.lastFrameTime) / 16.67, 3) : 1;
+    this.lastFrameTime = now;
+    this.updateLineWeatherEffect(this.weatherRain, delta);
+    this.updateLineWeatherEffect(this.weatherWind, delta);
+    for (const cloud of this.weatherClouds) {
+      cloud.sprite.position.x += cloud.speed * delta;
+      if (cloud.sprite.position.x > cloud.maxX) {
+        cloud.sprite.position.x = cloud.minX;
+      }
+    }
+    this.updateLightning(delta);
+  }
+
+  private updateLineWeatherEffect(effect: WeatherLineEffect | null, delta: number) {
+    if (!effect) {
+      return;
+    }
+    const { positions, bounds } = effect;
+    for (let index = 0; index < effect.count; index += 1) {
+      const offset = index * 6;
+      if (effect.kind === "rain") {
+        let x = positions[offset] + effect.drift * delta;
+        let y = positions[offset + 1] - effect.speed * delta;
+        let z = positions[offset + 2];
+        if (y < bounds.minY) {
+          x = THREE.MathUtils.lerp(bounds.minX, bounds.maxX, Math.random());
+          y = bounds.maxY;
+          z = THREE.MathUtils.lerp(bounds.minZ, bounds.maxZ, Math.random());
+        }
+        if (x > bounds.maxX) {
+          x = bounds.minX;
+        }
+        positions[offset] = x;
+        positions[offset + 1] = y;
+        positions[offset + 2] = z;
+        positions[offset + 3] = x + effect.drift * 8;
+        positions[offset + 4] = y + effect.length;
+        positions[offset + 5] = z;
+      } else {
+        let x = positions[offset] + effect.speed * delta;
+        const y = positions[offset + 1];
+        const z = positions[offset + 2];
+        if (x > bounds.maxX) {
+          x = bounds.minX;
+        }
+        positions[offset] = x;
+        positions[offset + 1] = y;
+        positions[offset + 2] = z;
+        positions[offset + 3] = x + effect.length;
+        positions[offset + 4] = y + 0.05;
+        positions[offset + 5] = z + 0.08;
+      }
+    }
+    const attribute = effect.object.geometry.getAttribute("position");
+    attribute.needsUpdate = true;
+  }
+
+  private updateLightning(delta: number) {
+    const preset = getWeatherPreset(this.weatherConfig.mode);
+    if (!preset.lightning.enabled || !this.weatherLightningLight) {
+      return;
+    }
+    this.weatherLightningCooldownFrames = Math.max(
+      this.weatherLightningCooldownFrames - delta,
+      0,
+    );
+    if (this.weatherLightningCooldownFrames === 0) {
+      this.triggerLightningBurst(preset);
+    }
+    if (this.weatherLightningBurstFrames > 0) {
+      const frame = Math.ceil(this.weatherLightningBurstFrames);
+      const ratio = this.weatherLightningBurstFrames / preset.lightning.burstFrames;
+      const pulse = frame % 3 === 0 ? 1 : frame % 2 === 0 ? 0.32 : 0.72;
+      this.weatherLightningFlash = preset.lightning.intensity * ratio * pulse;
+      this.weatherLightningBurstFrames = Math.max(
+        this.weatherLightningBurstFrames - delta,
+        0,
+      );
+    } else {
+      this.weatherLightningFlash *= 0.68 ** delta;
+    }
+    this.weatherLightningLight.intensity = this.weatherLightningFlash;
+    this.applyLightningFlashLighting(preset);
+    if (this.weatherLightningBolt) {
+      const material = this.weatherLightningBolt.material;
+      material.opacity = Math.min(this.weatherLightningFlash / preset.lightning.intensity, 1);
+      material.needsUpdate = true;
+    }
+    if (this.weatherLightningSkyFlash) {
+      const material = this.weatherLightningSkyFlash.material as THREE.SpriteMaterial;
+      material.opacity =
+        Math.min(this.weatherLightningFlash / preset.lightning.intensity, 1) * 0.42;
+      material.needsUpdate = true;
+    }
+  }
+
+  private applyLightningFlashLighting(preset: WeatherPreset) {
+    const flashRatio = Math.min(
+      this.weatherLightningFlash / Math.max(preset.lightning.intensity, 1),
+      1,
+    );
+    this.ambient.intensity =
+      this.environmentConfig.ambientIntensity * preset.lighting.ambientMultiplier +
+      flashRatio * 0.85;
+    this.directional.intensity =
+      this.environmentConfig.directionalIntensity *
+        preset.lighting.directionalMultiplier +
+      flashRatio * 1.35;
+    if (this.renderer) {
+      this.renderer.toneMappingExposure = THREE.MathUtils.clamp(
+        this.environmentConfig.exposure +
+          preset.lighting.exposureOffset +
+          flashRatio * 0.26,
+        0.25,
+        2.8,
+      );
+    }
+  }
+
+  private triggerLightningBurst(preset: WeatherPreset) {
+    this.weatherLightningBurstFrames = preset.lightning.burstFrames;
+    this.weatherLightningFlash = preset.lightning.intensity;
+    this.weatherLightningCooldownFrames = resolveWeatherLightningCooldownFrames(
+      Math.random(),
+    );
+    this.randomizeLightningBolt();
+  }
+
+  private randomizeLightningBolt() {
+    if (!this.weatherLightningBolt) {
+      return;
+    }
+    const bounds = this.getWeatherBounds();
+    const sceneSpan = this.getWeatherSceneSpan();
+    const weatherScale = resolveWeatherScale(sceneSpan);
+    const points: THREE.Vector3[] = [];
+    const strikePosition = resolveWeatherLightningStrikePosition(
+      bounds,
+      Math.random(),
+      Math.random(),
+    );
+    const startX = strikePosition.x;
+    const startZ = strikePosition.z;
+    this.weatherLightningLight?.position.set(startX, bounds.maxY - 2, startZ);
+    this.weatherLightningSkyFlash?.position.set(startX, bounds.maxY - 1, startZ);
+    for (let index = 0; index < 9; index += 1) {
+      const ratio = index / 8;
+      points.push(
+        new THREE.Vector3(
+          startX + THREE.MathUtils.lerp(-1.1, 1.1, Math.random()) * weatherScale,
+          THREE.MathUtils.lerp(
+            bounds.maxY - 0.8 * weatherScale,
+            bounds.minY + 1.5 * weatherScale,
+            ratio,
+          ),
+          startZ + THREE.MathUtils.lerp(-1.1, 1.1, Math.random()) * weatherScale,
+        ),
+      );
+    }
+    this.weatherLightningBolt.geometry.dispose();
+    this.weatherLightningBolt.geometry = this.createLightningGeometry(points, sceneSpan);
   }
 
   private scaleSelectionAroundCenter(

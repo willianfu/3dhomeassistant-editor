@@ -4,7 +4,9 @@ import { flattenModelTree } from "../../lib/model-tree";
 import { cn } from "../../lib/utils";
 import { getVirtualRange } from "../../lib/virtual-list";
 import type { ModelTreeNode } from "../../types/editor";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
 
 const ROW_HEIGHT = 32;
 const OVERSCAN = 8;
@@ -29,21 +31,23 @@ function TreeRow({
   const hasChildren = node.children.length > 0;
 
   return (
-    <button
+    <Button
       type="button"
+      variant={selected ? "secondary" : "ghost"}
+      size="sm"
       onClick={() => onSelect(node.id)}
       className={cn(
-        "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors hover:bg-secondary",
-        selected && "bg-primary/15 text-primary ring-1 ring-primary/35",
+        "h-8 w-full justify-start gap-2 px-2 text-left text-xs",
+        selected && "text-primary ring-1 ring-primary/35",
       )}
       style={{ paddingLeft: `${8 + node.depth * 14}px` }}
     >
-      {hasChildren ? <Folder size={14} /> : <Cuboid size={14} />}
+      {hasChildren ? <Folder data-icon="inline-start" /> : <Cuboid data-icon="inline-start" />}
       <span className="min-w-0 flex-1 truncate">{node.name}</span>
-      <span className="shrink-0 text-[10px] text-muted-foreground">
+      <Badge variant="secondary" className="shrink-0">
         {node.type}
-      </span>
-    </button>
+      </Badge>
+    </Button>
   );
 }
 
@@ -88,10 +92,7 @@ export function PartsTree({
             setViewportHeight(event.currentTarget.clientHeight);
           }}
         >
-          <div
-            className="relative"
-            style={{ height: `${virtualRange.totalHeight}px` }}
-          >
+          <div className="relative" style={{ height: `${virtualRange.totalHeight}px` }}>
             <div
               className="absolute left-0 right-0 grid gap-0.5"
               style={{ transform: `translateY(${virtualRange.offsetTop}px)` }}
@@ -109,22 +110,26 @@ export function PartsTree({
         </div>
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-          <div className="grid h-11 w-11 place-items-center rounded-md border border-border bg-secondary">
-            <Cuboid size={20} className="text-muted-foreground" />
-          </div>
-          <div>
-            <div className="text-sm font-medium">暂无模型零件</div>
-            <div className="mt-1 text-xs leading-5 text-muted-foreground">
-              上传 GLB 或 GLTF 后会自动解析模型层级。
-            </div>
-          </div>
-          <Button size="sm" onClick={onUploadClick}>
-            <Upload size={14} />
-            上传模型
-          </Button>
-          <Button variant="secondary" size="sm" onClick={onLoadSample}>
-            加载示例
-          </Button>
+          <Card className="w-full">
+            <CardContent className="flex flex-col items-center gap-3 p-4">
+              <div className="grid size-11 place-items-center rounded-md border border-border bg-secondary">
+                <Cuboid className="text-muted-foreground" />
+              </div>
+              <div>
+                <div className="text-sm font-medium">暂无模型零件</div>
+                <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                  上传 GLB 或 GLTF 后会自动解析模型层级。
+                </div>
+              </div>
+              <Button size="sm" onClick={onUploadClick}>
+                <Upload data-icon="inline-start" />
+                上传模型
+              </Button>
+              <Button variant="secondary" size="sm" onClick={onLoadSample}>
+                加载示例
+              </Button>
+            </CardContent>
+          </Card>
         </div>
       )}
     </aside>

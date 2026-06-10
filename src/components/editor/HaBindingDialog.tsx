@@ -1,7 +1,17 @@
-import { ChevronDown, Link2, RefreshCw, X } from "lucide-react";
+import { ChevronDown, Link2, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import type { HaBinding, HaDevice, HaEntityState } from "../../types/ha";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+import { ScrollArea } from "../ui/scroll-area";
 
 type HaBindingDialogProps = {
   open: boolean;
@@ -35,42 +45,31 @@ export function HaBindingDialog({
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  if (!open) {
-    return null;
-  }
-
   const filteredDevices = devices.filter((device) =>
     deviceName(device).toLowerCase().includes(query.toLowerCase()),
   );
 
   return (
-    <div className="absolute inset-0 z-40 grid place-items-center bg-background/50 backdrop-blur-sm">
-      <div className="flex h-[76vh] w-[620px] max-w-[calc(100vw-40px)] flex-col overflow-hidden rounded-md border border-border bg-panel shadow-2xl">
-        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">绑定 Home Assistant 实体</div>
-            <div className="truncate text-xs text-muted-foreground">
-              选择设备或设备下的单个实体
-            </div>
-          </div>
-          <Button size="icon" variant="ghost" className="shrink-0" onClick={onClose}>
-            <X size={16} />
-          </Button>
-        </div>
+    <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
+      <DialogContent className="flex h-[76vh] w-[620px] max-w-[calc(100vw-40px)] flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="border-b border-border px-4 py-3">
+          <DialogTitle>绑定 Home Assistant 实体</DialogTitle>
+          <DialogDescription>选择设备，或展开设备绑定单个实体。</DialogDescription>
+        </DialogHeader>
         <div className="flex min-w-0 items-center gap-2 border-b border-border p-3">
-          <input
-            className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+          <Input
+            className="min-w-0 flex-1"
             value={query}
             placeholder="搜索设备"
             onChange={(event) => setQuery(event.target.value)}
           />
           <Button size="sm" variant="secondary" className="shrink-0" onClick={onRefresh}>
-            <RefreshCw size={14} />
+            <RefreshCw data-icon="inline-start" />
             刷新
           </Button>
         </div>
-        <div className="editor-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-3">
-          <div className="grid min-w-0 gap-2 overflow-hidden">
+        <ScrollArea className="min-h-0 flex-1 p-3">
+          <div className="grid min-w-0 gap-2 overflow-hidden pr-3">
             {filteredDevices.map((device) => {
               const expanded = expandedDeviceId === device.id;
               const entities = deviceEntities[device.id] ?? [];
@@ -80,9 +79,10 @@ export function HaBindingDialog({
                   className="min-w-0 overflow-hidden rounded-md border border-border bg-background/50"
                 >
                   <div className="flex min-w-0 items-center justify-between gap-2 p-2">
-                    <button
+                    <Button
                       type="button"
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      variant="ghost"
+                      className="min-w-0 flex-1 justify-start px-2"
                       onClick={async () => {
                         setExpandedDeviceId(expanded ? null : device.id);
                         if (!expanded) {
@@ -91,19 +91,16 @@ export function HaBindingDialog({
                       }}
                     >
                       <ChevronDown
-                        size={14}
-                        className={`shrink-0 transition ${expanded ? "rotate-180" : ""}`}
+                        data-icon="inline-start"
+                        className={`transition ${expanded ? "rotate-180" : ""}`}
                       />
-                      <span className="min-w-0 flex-1 truncate text-sm" title={deviceName(device)}>
+                      <span className="min-w-0 flex-1 truncate text-left" title={deviceName(device)}>
                         {deviceName(device)}
                       </span>
-                      <span
-                        className="max-w-[120px] shrink truncate text-[10px] text-muted-foreground"
-                        title={device.id}
-                      >
+                      <Badge variant="secondary" className="max-w-[120px] shrink truncate">
                         {device.id}
-                      </span>
-                    </button>
+                      </Badge>
+                    </Button>
                     <Button
                       size="sm"
                       className="ml-auto shrink-0"
@@ -112,7 +109,7 @@ export function HaBindingDialog({
                         onBind({ type: "device", deviceId: device.id, entityIds });
                       }}
                     >
-                      <Link2 size={14} />
+                      <Link2 data-icon="inline-start" />
                       绑定设备
                     </Button>
                   </div>
@@ -159,8 +156,8 @@ export function HaBindingDialog({
               );
             })}
           </div>
-        </div>
-      </div>
-    </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,7 +1,9 @@
 import { Power, ToggleLeft, ToggleRight } from "lucide-react";
 import { getEntityDomain } from "../../lib/ha-client";
 import type { HaEntityState } from "../../types/ha";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Slider } from "../ui/slider";
 
 type HaEntityControlProps = {
   entityId: string;
@@ -19,10 +21,7 @@ function friendlyName(entityId: string, state?: HaEntityState) {
 
 function EntityName({ name }: { name: string }) {
   return (
-    <div
-      className="max-w-[128px] truncate text-xs font-medium leading-5"
-      title={name}
-    >
+    <div className="max-w-[128px] truncate text-xs font-medium leading-5" title={name}>
       {name}
     </div>
   );
@@ -47,19 +46,17 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
             className="shrink-0"
             onClick={() => onCall(entityId, isOn ? "turn_off" : "turn_on")}
           >
-            {isOn ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+            {isOn ? <ToggleRight data-icon="inline-start" /> : <ToggleLeft data-icon="inline-start" />}
             {isOn ? "关闭" : "开启"}
           </Button>
         </div>
         {domain === "light" ? (
-          <input
-            type="range"
-            className="w-full min-w-0 accent-primary"
+          <Slider
             min={1}
             max={255}
-            value={Number(state?.attributes.brightness ?? 128)}
-            onChange={(event) =>
-              onCall(entityId, "turn_on", { brightness: Number(event.target.value) })
+            value={[Number(state?.attributes.brightness ?? 128)]}
+            onValueChange={([brightness]) =>
+              onCall(entityId, "turn_on", { brightness })
             }
           />
         ) : null}
@@ -106,13 +103,10 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
       <div className="min-w-0 flex-1 overflow-hidden">
         <EntityName name={name} />
       </div>
-      <div
-        className="flex max-w-[96px] shrink-0 items-center gap-1 truncate text-xs text-muted-foreground"
-        title={stateText}
-      >
-        <Power size={13} />
-        <span className="truncate">{stateText}</span>
-      </div>
+      <Badge variant="secondary" className="max-w-[96px] shrink truncate" title={stateText}>
+        <Power data-icon="inline-start" />
+        {stateText}
+      </Badge>
     </div>
   );
 }

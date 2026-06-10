@@ -1,8 +1,9 @@
 import { Boxes, Lightbulb, Link2, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { removeHaBinding } from "../../lib/ha-bindings";
 import { defaultLightCapabilityConfig } from "../../lib/ha-capabilities/light";
 import { getEntityDomain } from "../../lib/ha-client";
+import { getSolarEnvironmentPreset } from "../../lib/environment-lighting";
 import type {
   EnvironmentConfig,
   ObjectMetadata,
@@ -15,11 +16,35 @@ import type {
   HaLightCapabilityConfig,
   HaManualDeviceType,
 } from "../../types/ha";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "../ui/accordion";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "../ui/card";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { ScrollArea } from "../ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Separator } from "../ui/separator";
+import { Slider } from "../ui/slider";
+import { Switch } from "../ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 type RightInspectorProps = {
@@ -41,6 +66,45 @@ type RightInspectorProps = {
   onGroupSelected: () => void;
   onDeleteSelected: () => void;
 };
+
+const NONE_VALUE = "__none";
+
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader className="p-3 pb-2">
+        <CardTitle>{title}</CardTitle>
+        {description ? <CardDescription>{description}</CardDescription> : null}
+      </CardHeader>
+      <CardContent className="grid gap-3 p-3 pt-0">{children}</CardContent>
+    </Card>
+  );
+}
+
+function AccordionPanel({
+  value,
+  title,
+  children,
+}: {
+  value: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <AccordionItem value={value} className="rounded-md border border-border bg-card px-3">
+      <AccordionTrigger>{title}</AccordionTrigger>
+      <AccordionContent className="grid gap-3">{children}</AccordionContent>
+    </AccordionItem>
+  );
+}
 
 function NumberField({
   label,
@@ -72,7 +136,49 @@ function NumberField({
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
+function SliderField({
+  label,
+  value,
+  min,
+  max,
+  step = 0.1,
+  suffix = "",
+  formatValue,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  suffix?: string;
+  formatValue?: (value: number) => string;
+  onChange: (value: number) => void;
+}) {
+  const displayValue = formatValue
+    ? formatValue(value)
+    : `${Number.isInteger(value) ? value : value.toFixed(2)}${suffix}`;
+
+  return (
+    <div className="grid gap-2">
+      <div className="flex items-center justify-between gap-3">
+        <Label>{label}</Label>
+        <Badge variant="secondary" className="shrink-0">
+          {displayValue}
+        </Badge>
+      </div>
+      <Slider
+        min={min}
+        max={max}
+        step={step}
+        value={[value]}
+        onValueChange={([next]) => onChange(next)}
+      />
+    </div>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 text-xs">
       <span className="shrink-0 text-muted-foreground">{label}</span>
@@ -123,6 +229,50 @@ function VectorFields({
   );
 }
 
+function DirectionSliders({
+  value,
+  onChange,
+}: {
+  value: Vector3Values;
+  onChange: (value: Vector3Values) => void;
+}) {
+  return (
+    <div className="grid gap-3">
+      <SliderField
+        label="东西方向"
+        min={-12}
+        max={12}
+        step={0.1}
+        value={value.x}
+        formatValue={(next) =>
+          next === 0 ? "中轴" : next > 0 ? `东 ${next.toFixed(1)}` : `西 ${Math.abs(next).toFixed(1)}`
+        }
+        onChange={(x) => onChange({ ...value, x })}
+      />
+      <SliderField
+        label="太阳高度"
+        min={0}
+        max={16}
+        step={0.1}
+        value={value.y}
+        formatValue={(next) => next.toFixed(1)}
+        onChange={(y) => onChange({ ...value, y })}
+      />
+      <SliderField
+        label="南北方向"
+        min={-12}
+        max={12}
+        step={0.1}
+        value={value.z}
+        formatValue={(next) =>
+          next === 0 ? "中轴" : next > 0 ? `南 ${next.toFixed(1)}` : `北 ${Math.abs(next).toFixed(1)}`
+        }
+        onChange={(z) => onChange({ ...value, z })}
+      />
+    </div>
+  );
+}
+
 function SizeScalePanel({
   selectionTransform,
   metadata,
@@ -143,8 +293,7 @@ function SizeScalePanel({
   }
 
   return (
-    <div className="grid gap-3 rounded-md border border-border bg-background/50 p-3">
-      <div className="text-xs font-medium text-muted-foreground">尺寸与缩放</div>
+    <div className="grid gap-3">
       <VectorFields
         labels={["长", "宽", "高"]}
         min={0.001}
@@ -153,8 +302,8 @@ function SizeScalePanel({
         onChange={onSizeChange}
       />
       {metadata ? (
-        <div>
-          <div className="mb-2 text-xs text-muted-foreground">对象缩放</div>
+        <div className="grid gap-2">
+          <Label>对象缩放</Label>
           <VectorFields
             min={0.001}
             step={0.05}
@@ -199,18 +348,16 @@ function HaBindingPanel({
   onBindingsChange: (bindings: HaBinding[]) => void;
 }) {
   return (
-    <div className="grid min-w-0 gap-2 overflow-hidden rounded-md border border-border bg-background/50 p-3">
+    <Section title="Home Assistant 绑定">
       <div className="flex min-w-0 items-center justify-between gap-3">
-        <div className="min-w-0 truncate text-xs font-medium text-muted-foreground">
-          HA 绑定
-        </div>
+        <Badge variant="secondary">{bindings.length} 项</Badge>
         <Button
           size="sm"
           variant="secondary"
           className="ml-auto shrink-0"
           onClick={onOpenBindingDialog}
         >
-          <Link2 size={14} />
+          <Link2 data-icon="inline-start" />
           绑定实体
         </Button>
       </div>
@@ -230,7 +377,7 @@ function HaBindingPanel({
             return (
               <div
                 key={`${binding.type}:${id}`}
-                className="min-w-0 overflow-hidden rounded-md border border-border bg-panel/70 p-2"
+                className="min-w-0 overflow-hidden rounded-md border border-border bg-background/50 p-2"
               >
                 <div className="flex min-w-0 items-center justify-between gap-2">
                   <div className="min-w-0 flex-1 overflow-hidden">
@@ -247,7 +394,7 @@ function HaBindingPanel({
                     className="shrink-0"
                     onClick={() => onBindingsChange(removeHaBinding(bindings, id))}
                   >
-                    <X size={13} />
+                    <X data-icon="icon" />
                   </Button>
                 </div>
               </div>
@@ -255,7 +402,7 @@ function HaBindingPanel({
           })
         )}
       </div>
-    </div>
+    </Section>
   );
 }
 
@@ -281,20 +428,22 @@ function DeviceTypeSelect({
   onChange: (value: HaManualDeviceType) => void;
 }) {
   return (
-    <div className="grid gap-1.5">
-      <Label>设备类型</Label>
-      <select
-        className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        value={value}
-        onChange={(event) => onChange(event.target.value as HaManualDeviceType)}
-      >
-        {DEVICE_TYPE_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </div>
+    <Section title="设备类型">
+      <Select value={value} onValueChange={(next) => onChange(next as HaManualDeviceType)}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {DEVICE_TYPE_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </Section>
   );
 }
 
@@ -318,18 +467,24 @@ function EntitySelect({
   return (
     <div className="grid gap-1.5">
       <Label>{label}</Label>
-      <select
-        className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        value={value ?? ""}
-        onChange={(event) => onChange(event.target.value || undefined)}
+      <Select
+        value={value ?? NONE_VALUE}
+        onValueChange={(next) => onChange(next === NONE_VALUE ? undefined : next)}
       >
-        <option value="">不绑定</option>
-        {entityIds.map((entityId) => (
-          <option key={entityId} value={entityId}>
-            {entityLabel(entityId, states)}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={NONE_VALUE}>不绑定</SelectItem>
+            {entityIds.map((entityId) => (
+              <SelectItem key={entityId} value={entityId}>
+                {entityLabel(entityId, states)}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -369,53 +524,64 @@ function LightCapabilityPanel({
     onChange({ ...current, ...patch });
 
   return (
-    <div className="grid min-w-0 gap-3 rounded-md border border-amber-400/25 bg-amber-400/5 p-3">
+    <Section title="灯光能力" description="绑定为真实 Three.js 光源">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <Lightbulb size={15} className="shrink-0 text-amber-300" />
-          <div className="min-w-0 truncate text-xs font-medium text-amber-100">
-            灯光能力
-          </div>
+          <Lightbulb className="shrink-0 text-primary" />
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            启用后会根据 HA 状态同步发光
+          </span>
         </div>
-        <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
+        <div className="flex shrink-0 items-center gap-2">
+          <Switch
             checked={current.enabled}
-            onChange={(event) => update({ enabled: event.target.checked })}
+            onCheckedChange={(enabled) => update({ enabled })}
           />
-          作为光源
-        </label>
+          <Label className="text-xs">作为光源</Label>
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div className="grid gap-1.5">
           <Label>光源类型</Label>
-          <select
-            className="h-9 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          <Select
             value={current.lightType}
-            onChange={(event) =>
-              update({ lightType: event.target.value as HaLightCapabilityConfig["lightType"] })
+            onValueChange={(lightType) =>
+              update({ lightType: lightType as HaLightCapabilityConfig["lightType"] })
             }
           >
-            <option value="point">点光源</option>
-            <option value="spot">聚光灯</option>
-            <option value="area">面光源</option>
-          </select>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="point">点光源</SelectItem>
+                <SelectItem value="spot">聚光灯</SelectItem>
+                <SelectItem value="area">面光源</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
         <div className="grid gap-1.5">
           <Label>发光位置</Label>
-          <select
-            className="h-9 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          <Select
             value={current.emissionMode}
-            onChange={(event) =>
+            onValueChange={(emissionMode) =>
               update({
-                emissionMode: event.target
-                  .value as HaLightCapabilityConfig["emissionMode"],
+                emissionMode:
+                  emissionMode as HaLightCapabilityConfig["emissionMode"],
               })
             }
           >
-            <option value="whole">整体发光</option>
-            <option value="bottom">底部发光</option>
-          </select>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="whole">整体发光</SelectItem>
+                <SelectItem value="bottom">底部发光</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2">
@@ -490,7 +656,7 @@ function LightCapabilityPanel({
           update({ colorTemperatureEntityId })
         }
       />
-    </div>
+    </Section>
   );
 }
 
@@ -516,11 +682,6 @@ export function RightInspector({
   const updateEnvironment = (patch: Partial<EnvironmentConfig>) => {
     onEnvironmentChange({ ...environment, ...patch });
   };
-  const updateDirectionalPosition = (patch: Partial<Vector3Values>) => {
-    updateEnvironment({
-      directionalPosition: { ...environment.directionalPosition, ...patch },
-    });
-  };
 
   return (
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-border bg-panel">
@@ -536,68 +697,88 @@ export function RightInspector({
         <TabsContent value="environment" className="h-[calc(100%-44px)]">
           <ScrollArea className="h-full pr-3">
             <div className="grid gap-4">
-              <NumberField
-                label="环境光强度"
-                min={0}
-                max={3}
-                step={0.05}
-                value={environment.ambientIntensity}
-                onChange={(ambientIntensity) => updateEnvironment({ ambientIntensity })}
-              />
-              <NumberField
-                label="主光强度"
-                min={0}
-                max={5}
-                step={0.05}
-                value={environment.directionalIntensity}
-                onChange={(directionalIntensity) =>
-                  updateEnvironment({ directionalIntensity })
-                }
-              />
-              <NumberField
-                label="曝光"
-                min={0.2}
-                max={2.5}
-                step={0.05}
-                value={environment.exposure}
-                onChange={(exposure) => updateEnvironment({ exposure })}
-              />
-              <NumberField
-                label="墙体透明度"
-                min={0.08}
-                max={1}
-                step={0.02}
-                value={environment.wallOpacity}
-                onChange={(wallOpacity) => updateEnvironment({ wallOpacity })}
-              />
-              <Separator />
-              <div className="grid grid-cols-3 gap-2">
-                <NumberField
-                  label="光源 X"
-                  value={environment.directionalPosition.x}
-                  onChange={(x) => updateDirectionalPosition({ x })}
-                />
-                <NumberField
-                  label="光源 Y"
-                  value={environment.directionalPosition.y}
-                  onChange={(y) => updateDirectionalPosition({ y })}
-                />
-                <NumberField
-                  label="光源 Z"
-                  value={environment.directionalPosition.z}
-                  onChange={(z) => updateDirectionalPosition({ z })}
-                />
-              </div>
-              <label className="flex items-center gap-2 rounded-md border border-border bg-background/50 px-3 py-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={environment.gridVisible}
-                  onChange={(event) =>
-                    updateEnvironment({ gridVisible: event.target.checked })
+              <Section title="日照时间轴" description="24 档环境光预设，按上北下南左西右东计算太阳方向。">
+                <SliderField
+                  label="时间"
+                  min={0}
+                  max={23}
+                  step={1}
+                  value={environment.timeOfDay}
+                  formatValue={(value) => `${String(value).padStart(2, "0")}:00`}
+                  onChange={(timeOfDay) =>
+                    onEnvironmentChange(getSolarEnvironmentPreset(timeOfDay, environment))
                   }
                 />
-                显示网格
-              </label>
+                <div className="grid grid-cols-4 gap-1 text-[10px] text-muted-foreground">
+                  <span>00 夜间</span>
+                  <span>06 东升</span>
+                  <span>12 南中</span>
+                  <span>19 夜间</span>
+                </div>
+              </Section>
+              <Section title="环境光照">
+                <SliderField
+                  label="环境光强度"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={environment.ambientIntensity}
+                  onChange={(ambientIntensity) => updateEnvironment({ ambientIntensity })}
+                />
+                <SliderField
+                  label="主光强度"
+                  min={0}
+                  max={5}
+                  step={0.05}
+                  value={environment.directionalIntensity}
+                  onChange={(directionalIntensity) =>
+                    updateEnvironment({ directionalIntensity })
+                  }
+                />
+                <SliderField
+                  label="环境色温"
+                  min={1800}
+                  max={7500}
+                  step={50}
+                  suffix="K"
+                  value={environment.colorTemperatureKelvin}
+                  onChange={(colorTemperatureKelvin) =>
+                    updateEnvironment({ colorTemperatureKelvin })
+                  }
+                />
+                <SliderField
+                  label="曝光"
+                  min={0.2}
+                  max={2.5}
+                  step={0.05}
+                  value={environment.exposure}
+                  onChange={(exposure) => updateEnvironment({ exposure })}
+                />
+                <SliderField
+                  label="墙体透明度"
+                  min={0.08}
+                  max={1}
+                  step={0.02}
+                  value={environment.wallOpacity}
+                  onChange={(wallOpacity) => updateEnvironment({ wallOpacity })}
+                />
+              </Section>
+              <Section title="太阳方向">
+                <DirectionSliders
+                  value={environment.directionalPosition}
+                  onChange={(directionalPosition) =>
+                    updateEnvironment({ directionalPosition })
+                  }
+                />
+                <Separator />
+                <div className="flex items-center justify-between gap-3">
+                  <Label>显示网格</Label>
+                  <Switch
+                    checked={environment.gridVisible}
+                    onCheckedChange={(gridVisible) => updateEnvironment({ gridVisible })}
+                  />
+                </div>
+              </Section>
             </div>
           </ScrollArea>
         </TabsContent>
@@ -605,20 +786,27 @@ export function RightInspector({
           <ScrollArea className="h-full pr-3">
             {selectedCount > 1 ? (
               <div className="grid gap-4">
-                <div className="rounded-md border border-border bg-background/50 p-3 text-sm">
-                  已选中 {selectedCount} 个零件
-                </div>
+                <Accordion type="multiple" className="grid gap-3">
+                  <AccordionPanel value="batch-info" title="批量选择">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-muted-foreground">已选零件</span>
+                      <Badge>{selectedCount}</Badge>
+                    </div>
+                  </AccordionPanel>
+                  <AccordionPanel value="size" title="尺寸与缩放">
+                    <SizeScalePanel
+                      selectionTransform={selectionTransform}
+                      metadata={null}
+                      onScaleChange={onScaleChange}
+                      onSizeChange={onSizeChange}
+                      onUniformScale={onUniformScale}
+                    />
+                  </AccordionPanel>
+                </Accordion>
                 <Button variant="secondary" onClick={onGroupSelected}>
-                  <Boxes size={15} />
+                  <Boxes data-icon="inline-start" />
                   组合为新模型
                 </Button>
-                <SizeScalePanel
-                  selectionTransform={selectionTransform}
-                  metadata={null}
-                  onScaleChange={onScaleChange}
-                  onSizeChange={onSizeChange}
-                  onUniformScale={onUniformScale}
-                />
                 <HaBindingPanel
                   bindings={selectionBindings}
                   haStates={haStates}
@@ -626,36 +814,37 @@ export function RightInspector({
                   onBindingsChange={onBindingsChange}
                 />
                 <Button variant="destructive" onClick={onDeleteSelected}>
-                  <Trash2 size={15} />
+                  <Trash2 data-icon="inline-start" />
                   删除选中零件
                 </Button>
               </div>
             ) : metadata ? (
               <div className="grid gap-4">
-                <div className="grid gap-2 rounded-md border border-border bg-background/50 p-3">
-                  <InfoRow label="名称" value={metadata.name} />
-                  <InfoRow label="类型" value={metadata.type} />
-                  <InfoRow label="父级" value={metadata.parentName ?? "-"} />
-                  <InfoRow label="子节点" value={metadata.childCount} />
-                  <InfoRow label="网格数" value={metadata.meshCount} />
-                  <InfoRow label="对象ID" value={metadata.objectId ?? "-"} />
-                  <InfoRow label="绑定组" value={metadata.bindingGroupId ?? "-"} />
-                  <InfoRow label="HA实体" value={metadata.entityId ?? "-"} />
-                  <InfoRow label="UUID" value={metadata.id} />
-                </div>
-                <div>
-                  <div className="mb-2 text-xs font-medium text-muted-foreground">
-                    位置
-                  </div>
-                  <VectorFields value={metadata.position} onChange={onPositionChange} />
-                </div>
-                <SizeScalePanel
-                  selectionTransform={selectionTransform}
-                  metadata={metadata}
-                  onScaleChange={onScaleChange}
-                  onSizeChange={onSizeChange}
-                  onUniformScale={onUniformScale}
-                />
+                <Accordion type="multiple" className="grid gap-3">
+                  <AccordionPanel value="basic" title="基础信息">
+                    <InfoRow label="名称" value={metadata.name} />
+                    <InfoRow label="类型" value={metadata.type} />
+                    <InfoRow label="父级" value={metadata.parentName ?? "-"} />
+                    <InfoRow label="子节点" value={metadata.childCount} />
+                    <InfoRow label="网格数" value={metadata.meshCount} />
+                    <InfoRow label="对象ID" value={metadata.objectId ?? "-"} />
+                    <InfoRow label="绑定组" value={metadata.bindingGroupId ?? "-"} />
+                    <InfoRow label="HA实体" value={metadata.entityId ?? "-"} />
+                    <InfoRow label="UUID" value={metadata.id} />
+                  </AccordionPanel>
+                  <AccordionPanel value="position" title="位置">
+                    <VectorFields value={metadata.position} onChange={onPositionChange} />
+                  </AccordionPanel>
+                  <AccordionPanel value="size" title="尺寸与缩放">
+                    <SizeScalePanel
+                      selectionTransform={selectionTransform}
+                      metadata={metadata}
+                      onScaleChange={onScaleChange}
+                      onSizeChange={onSizeChange}
+                      onUniformScale={onUniformScale}
+                    />
+                  </AccordionPanel>
+                </Accordion>
                 <HaBindingPanel
                   bindings={metadata.bindings}
                   haStates={haStates}
@@ -673,14 +862,14 @@ export function RightInspector({
                   manualDeviceType={metadata.deviceType}
                   onChange={onLightCapabilityChange}
                 />
-                <div className="grid gap-2 rounded-md border border-border bg-background/50 p-3">
+                <Section title="旋转">
                   <InfoRow
-                    label="旋转"
+                    label="欧拉角"
                     value={`${metadata.rotation.x}, ${metadata.rotation.y}, ${metadata.rotation.z}`}
                   />
-                </div>
+                </Section>
                 <Button variant="destructive" onClick={onDeleteSelected}>
-                  <Trash2 size={15} />
+                  <Trash2 data-icon="inline-start" />
                   删除选中零件
                 </Button>
               </div>
