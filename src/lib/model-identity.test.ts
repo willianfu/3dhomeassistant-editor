@@ -1,6 +1,13 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
-import { ensureModelObjectIds, getModelObjectId } from "./model-identity";
+import {
+  ensureModelObjectIds,
+  getLightCapabilityConfig,
+  getManualDeviceType,
+  getModelObjectId,
+  setManualDeviceType,
+  setLightCapabilityConfig,
+} from "./model-identity";
 
 describe("model-identity", () => {
   it("assigns persistent object ids without merging repeated names", () => {
@@ -27,5 +34,37 @@ describe("model-identity", () => {
     ensureModelObjectIds(root);
 
     expect(getModelObjectId(mesh)).toBe("custom-lamp-id");
+  });
+
+  it("stores light capability config independently from bindings", () => {
+    const mesh = new THREE.Mesh();
+
+    setLightCapabilityConfig(mesh, {
+      enabled: true,
+      lightType: "spot",
+      emissionMode: "whole",
+      coneAngle: 38,
+      maxIntensity: 3,
+      lightRange: 16,
+      maxBrightness: 100,
+      fixedColorTemperatureKelvin: 4000,
+      brightnessEntityId: "number.lamp_level",
+    });
+
+    expect(getLightCapabilityConfig(mesh)).toMatchObject({
+      enabled: true,
+      lightType: "spot",
+      coneAngle: 38,
+      brightnessEntityId: "number.lamp_level",
+    });
+  });
+
+  it("stores a manual device type separately from capability config", () => {
+    const mesh = new THREE.Mesh();
+
+    setManualDeviceType(mesh, "light");
+
+    expect(getManualDeviceType(mesh)).toBe("light");
+    expect(getLightCapabilityConfig(mesh)).toBeNull();
   });
 });

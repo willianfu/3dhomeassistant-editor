@@ -1,13 +1,20 @@
-import { Boxes, Link2, Trash2, X } from "lucide-react";
+import { Boxes, Lightbulb, Link2, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { removeHaBinding } from "../../lib/ha-bindings";
+import { defaultLightCapabilityConfig } from "../../lib/ha-capabilities/light";
+import { getEntityDomain } from "../../lib/ha-client";
 import type {
   EnvironmentConfig,
   ObjectMetadata,
   SelectionTransformInfo,
   Vector3Values,
 } from "../../types/editor";
-import type { HaBinding, HaEntityState } from "../../types/ha";
+import type {
+  HaBinding,
+  HaEntityState,
+  HaLightCapabilityConfig,
+  HaManualDeviceType,
+} from "../../types/ha";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -28,6 +35,8 @@ type RightInspectorProps = {
   onUniformScale: (multiplier: number) => void;
   onOpenBindingDialog: () => void;
   onBindingsChange: (bindings: HaBinding[]) => void;
+  onLightCapabilityChange: (config: HaLightCapabilityConfig) => void;
+  onManualDeviceTypeChange: (deviceType: HaManualDeviceType) => void;
   haStates: Record<string, HaEntityState>;
   onGroupSelected: () => void;
   onDeleteSelected: () => void;
@@ -250,6 +259,241 @@ function HaBindingPanel({
   );
 }
 
+const DEVICE_TYPE_OPTIONS: Array<{ value: HaManualDeviceType; label: string }> = [
+  { value: "auto", label: "自动识别" },
+  { value: "light", label: "灯光" },
+  { value: "cover", label: "窗帘 / 门" },
+  { value: "climate", label: "空调" },
+  { value: "switch", label: "开关" },
+  { value: "button", label: "按钮" },
+  { value: "fan", label: "风扇" },
+  { value: "sensor", label: "传感器" },
+  { value: "number", label: "数值" },
+  { value: "select", label: "选择" },
+  { value: "text", label: "文本输入" },
+];
+
+function DeviceTypeSelect({
+  value,
+  onChange,
+}: {
+  value: HaManualDeviceType;
+  onChange: (value: HaManualDeviceType) => void;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <Label>设备类型</Label>
+      <select
+        className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        value={value}
+        onChange={(event) => onChange(event.target.value as HaManualDeviceType)}
+      >
+        {DEVICE_TYPE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function entityLabel(entityId: string, states: Record<string, HaEntityState>) {
+  return String(states[entityId]?.attributes.friendly_name ?? entityId);
+}
+
+function EntitySelect({
+  label,
+  value,
+  entityIds,
+  states,
+  onChange,
+}: {
+  label: string;
+  value?: string;
+  entityIds: string[];
+  states: Record<string, HaEntityState>;
+  onChange: (value: string | undefined) => void;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <Label>{label}</Label>
+      <select
+        className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value || undefined)}
+      >
+        <option value="">不绑定</option>
+        {entityIds.map((entityId) => (
+          <option key={entityId} value={entityId}>
+            {entityLabel(entityId, states)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function LightCapabilityPanel({
+  bindings,
+  config,
+  haStates,
+  onChange,
+  manualDeviceType,
+}: {
+  bindings: HaBinding[];
+  config: HaLightCapabilityConfig | null;
+  haStates: Record<string, HaEntityState>;
+  onChange: (config: HaLightCapabilityConfig) => void;
+  manualDeviceType: HaManualDeviceType;
+}) {
+  const entityIds = bindings.flatMap((binding) =>
+    binding.type === "entity" ? [binding.entityId] : binding.entityIds,
+  );
+  const hasLightEntity = entityIds.some((entityId) => getEntityDomain(entityId) === "light");
+  const current = { ...defaultLightCapabilityConfig(), ...(config ?? {}) };
+
+  if (!hasLightEntity && manualDeviceType !== "light" && !current.enabled) {
+    return null;
+  }
+
+  const numericEntityIds = entityIds.filter((entityId) =>
+    ["light", "number", "input_number", "sensor"].includes(getEntityDomain(entityId)),
+  );
+  const powerEntityIds = entityIds.filter((entityId) =>
+    ["light", "switch", "input_boolean", "binary_sensor"].includes(
+      getEntityDomain(entityId),
+    ),
+  );
+  const update = (patch: Partial<HaLightCapabilityConfig>) =>
+    onChange({ ...current, ...patch });
+
+  return (
+    <div className="grid min-w-0 gap-3 rounded-md border border-amber-400/25 bg-amber-400/5 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Lightbulb size={15} className="shrink-0 text-amber-300" />
+          <div className="min-w-0 truncate text-xs font-medium text-amber-100">
+            灯光能力
+          </div>
+        </div>
+        <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={current.enabled}
+            onChange={(event) => update({ enabled: event.target.checked })}
+          />
+          作为光源
+        </label>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="grid gap-1.5">
+          <Label>光源类型</Label>
+          <select
+            className="h-9 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            value={current.lightType}
+            onChange={(event) =>
+              update({ lightType: event.target.value as HaLightCapabilityConfig["lightType"] })
+            }
+          >
+            <option value="point">点光源</option>
+            <option value="spot">聚光灯</option>
+            <option value="area">面光源</option>
+          </select>
+        </div>
+        <div className="grid gap-1.5">
+          <Label>发光位置</Label>
+          <select
+            className="h-9 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            value={current.emissionMode}
+            onChange={(event) =>
+              update({
+                emissionMode: event.target
+                  .value as HaLightCapabilityConfig["emissionMode"],
+              })
+            }
+          >
+            <option value="whole">整体发光</option>
+            <option value="bottom">底部发光</option>
+          </select>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField
+          label="发光角度"
+          min={5}
+          max={120}
+          step={1}
+          value={current.coneAngle}
+          onChange={(coneAngle) => update({ coneAngle })}
+        />
+        <NumberField
+          label="照明范围"
+          min={1}
+          max={80}
+          step={1}
+          value={current.lightRange}
+          onChange={(lightRange) => update({ lightRange })}
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField
+          label="光强上限"
+          min={0.1}
+          max={80}
+          step={0.1}
+          value={current.maxIntensity}
+          onChange={(maxIntensity) => update({ maxIntensity })}
+        />
+        <NumberField
+          label="最大亮度"
+          min={1}
+          max={1000}
+          step={1}
+          value={current.maxBrightness}
+          onChange={(maxBrightness) => update({ maxBrightness })}
+        />
+      </div>
+      <NumberField
+        label="固定色温 K"
+        min={1800}
+        max={6500}
+        step={50}
+        value={current.fixedColorTemperatureKelvin}
+        onChange={(fixedColorTemperatureKelvin) =>
+          update({ fixedColorTemperatureKelvin })
+        }
+      />
+      <EntitySelect
+        label="亮灭状态实体"
+        value={current.powerEntityId}
+        entityIds={powerEntityIds}
+        states={haStates}
+        onChange={(powerEntityId) => update({ powerEntityId })}
+      />
+      <div className="text-[10px] leading-4 text-muted-foreground">
+        不绑定亮灭状态实体时，会使用主绑定实体本身的开关状态。
+      </div>
+      <EntitySelect
+        label="亮度实体"
+        value={current.brightnessEntityId}
+        entityIds={numericEntityIds}
+        states={haStates}
+        onChange={(brightnessEntityId) => update({ brightnessEntityId })}
+      />
+      <EntitySelect
+        label="色温实体"
+        value={current.colorTemperatureEntityId}
+        entityIds={numericEntityIds}
+        states={haStates}
+        onChange={(colorTemperatureEntityId) =>
+          update({ colorTemperatureEntityId })
+        }
+      />
+    </div>
+  );
+}
+
 export function RightInspector({
   environment,
   metadata,
@@ -263,6 +507,8 @@ export function RightInspector({
   onUniformScale,
   onOpenBindingDialog,
   onBindingsChange,
+  onLightCapabilityChange,
+  onManualDeviceTypeChange,
   haStates,
   onGroupSelected,
   onDeleteSelected,
@@ -415,6 +661,17 @@ export function RightInspector({
                   haStates={haStates}
                   onOpenBindingDialog={onOpenBindingDialog}
                   onBindingsChange={onBindingsChange}
+                />
+                <DeviceTypeSelect
+                  value={metadata.deviceType}
+                  onChange={onManualDeviceTypeChange}
+                />
+                <LightCapabilityPanel
+                  bindings={metadata.bindings}
+                  config={metadata.lightCapability}
+                  haStates={haStates}
+                  manualDeviceType={metadata.deviceType}
+                  onChange={onLightCapabilityChange}
                 />
                 <div className="grid gap-2 rounded-md border border-border bg-background/50 p-3">
                   <InfoRow

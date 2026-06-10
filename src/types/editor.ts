@@ -1,4 +1,4 @@
-import type { HaBinding } from "./ha";
+import type { HaBinding, HaLightCapabilityConfig, HaManualDeviceType } from "./ha";
 
 export type Vector3Values = {
   x: number;
@@ -21,7 +21,9 @@ export type ObjectMetadata = {
   objectId: string | null;
   bindingGroupId: string | null;
   entityId: string | null;
+  deviceType: HaManualDeviceType;
   bindings: HaBinding[];
+  lightCapability: HaLightCapabilityConfig | null;
   name: string;
   type: string;
   parentName: string | null;

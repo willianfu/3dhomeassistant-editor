@@ -6,6 +6,12 @@ import { HaFloatingPanel } from "./components/editor/HaFloatingPanel";
 import { TopToolbar } from "./components/editor/TopToolbar";
 import { Viewport } from "./components/editor/Viewport";
 import { useHomeAssistant } from "./hooks/useHomeAssistant";
+import {
+  closeHaFloatingPanel,
+  openHaFloatingPanel,
+  removeMissingHaFloatingPanels,
+  type HaFloatingPanelState,
+} from "./lib/ha-floating-panels";
 import { addHaBinding, getBoundEntityIds } from "./lib/ha-bindings";
 import {
   buildModelTree,
@@ -15,7 +21,7 @@ import {
 } from "./lib/model-tree";
 import type { EditorHistoryState } from "./lib/editor-history";
 import type { ThreeEditor } from "./lib/three-editor";
-import type { HaBinding } from "./types/ha";
+import type { HaBinding, HaLightCapabilityConfig, HaManualDeviceType } from "./types/ha";
 import type {
   EnvironmentConfig,
   ModelTreeNode,
@@ -25,6 +31,28 @@ import type {
   Vector3Values,
 } from "./types/editor";
 import { defaultEnvironment } from "./types/editor";
+
+function anchorsEqual(
+  current: Record<string, { x: number; y: number } | null>,
+  next: Record<string, { x: number; y: number } | null>,
+) {
+  const currentKeys = Object.keys(current);
+  const nextKeys = Object.keys(next);
+  if (currentKeys.length !== nextKeys.length) {
+    return false;
+  }
+  return nextKeys.every((key) => {
+    const currentPoint = current[key];
+    const nextPoint = next[key];
+    if (!currentPoint || !nextPoint) {
+      return currentPoint === nextPoint;
+    }
+    return (
+      Math.abs(currentPoint.x - nextPoint.x) < 0.5 &&
+      Math.abs(currentPoint.y - nextPoint.y) < 0.5
+    );
+  });
+}
 
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -71,8 +99,10 @@ export default function App() {
     isDirty: false,
   });
   const [bindingDialogOpen, setBindingDialogOpen] = useState(false);
-  const [floatingPanelClosed, setFloatingPanelClosed] = useState(false);
-  const [floatingAnchor, setFloatingAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [floatingPanels, setFloatingPanels] = useState<HaFloatingPanelState[]>([]);
+  const [floatingAnchors, setFloatingAnchors] = useState<
+    Record<string, { x: number; y: number } | null>
+  >({});
   const ha = useHomeAssistant();
   const [environment, setEnvironment] =
     useState<EnvironmentConfig>(defaultEnvironment);
@@ -109,15 +139,53 @@ export default function App() {
   }, [editor, modelVersion, selectedIds]);
 
   useEffect(() => {
-    setFloatingPanelClosed(false);
-  }, [selectedIds.join("|")]);
+    let frame = 0;
+    const updateAnchors = () => {
+      if (!editor) {
+        setFloatingAnchors((current) =>
+          Object.keys(current).length === 0 ? current : {},
+        );
+        frame = window.requestAnimationFrame(updateAnchors);
+        return;
+      }
+      if (floatingPanels.length === 0) {
+        setFloatingAnchors((current) =>
+          Object.keys(current).length === 0 ? current : {},
+        );
+        frame = window.requestAnimationFrame(updateAnchors);
+        return;
+      }
+      const existingObjectIds = new Set(
+        floatingPanels
+          .flatMap((panel) => panel.objectIds)
+          .filter((objectId) => Boolean(editor.getObject(objectId))),
+      );
+      setFloatingPanels((panels) =>
+        removeMissingHaFloatingPanels(panels, existingObjectIds),
+      );
+      setFloatingAnchors((current) => {
+        const next: Record<string, { x: number; y: number } | null> = {};
+        for (const panel of floatingPanels) {
+          next[panel.id] = editor.getScreenAnchorForObjects(panel.objectIds);
+        }
+        return anchorsEqual(current, next) ? current : next;
+      });
+      frame = window.requestAnimationFrame(updateAnchors);
+    };
+    frame = window.requestAnimationFrame(updateAnchors);
+    return () => window.cancelAnimationFrame(frame);
+  }, [editor, floatingPanels, modelVersion, viewMode]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      setFloatingAnchor(editor?.getSelectionScreenAnchor() ?? null);
-    }, 120);
-    return () => window.clearInterval(interval);
-  }, [editor, selectedIds, modelVersion, viewMode]);
+    if (!editor || selectedIds.length === 0) {
+      return;
+    }
+    const bindings = editor.getBindingsForObjects(selectedIds);
+    if (getBoundEntityIds(bindings).length === 0) {
+      return;
+    }
+    setFloatingPanels((panels) => openHaFloatingPanel(panels, selectedIds));
+  }, [editor, modelVersion, selectedIds]);
 
   useEffect(() => {
     editor?.setEnvironment(environment);
@@ -320,14 +388,20 @@ export default function App() {
     setModelVersion((version) => version + 1);
   };
 
+  const handleLightCapabilityChange = (config: HaLightCapabilityConfig) => {
+    editor?.updateLightCapabilityForSelection(config);
+    setModelVersion((version) => version + 1);
+  };
+
+  const handleManualDeviceTypeChange = (deviceType: HaManualDeviceType) => {
+    editor?.updateManualDeviceTypeForSelection(deviceType);
+    setModelVersion((version) => version + 1);
+  };
+
   const handleBind = (binding: HaBinding) => {
     handleBindingsChange(addHaBinding(selectionBindings, binding));
     setBindingDialogOpen(false);
   };
-
-  const hasFloatingBindings =
-    !floatingPanelClosed &&
-    getBoundEntityIds(selectionBindings).length > 0;
 
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
@@ -403,6 +477,8 @@ export default function App() {
             onUniformScale={handleUniformScale}
             onOpenBindingDialog={() => setBindingDialogOpen(true)}
             onBindingsChange={handleBindingsChange}
+            onLightCapabilityChange={handleLightCapabilityChange}
+            onManualDeviceTypeChange={handleManualDeviceTypeChange}
             haStates={ha.states}
             onGroupSelected={handleGroupSelected}
             onDeleteSelected={handleDeleteSelected}
@@ -420,17 +496,23 @@ export default function App() {
             onBind={handleBind}
           />
         ) : null}
-        {hasFloatingBindings ? (
+        {floatingPanels.map((panel) => (
           <HaFloatingPanel
-            anchor={floatingAnchor}
-            bindings={selectionBindings}
+            key={panel.id}
+            anchor={floatingAnchors[panel.id] ?? null}
+            bindings={editor?.getBindingsForObjects(panel.objectIds) ?? []}
+            lightCapability={
+              editor?.getLightCapabilityForObjects(panel.objectIds) ?? null
+            }
             states={ha.states}
             onCall={(entityId, service, serviceData) =>
               void ha.callEntity(entityId, service, serviceData)
             }
-            onClose={() => setFloatingPanelClosed(true)}
+            onClose={() =>
+              setFloatingPanels((panels) => closeHaFloatingPanel(panels, panel.id))
+            }
           />
-        ) : null}
+        ))}
       </div>
     </main>
   );

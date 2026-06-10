@@ -1,5 +1,9 @@
 import * as THREE from "three";
-import type { HaBinding } from "../types/ha";
+import type {
+  HaBinding,
+  HaLightCapabilityConfig,
+  HaManualDeviceType,
+} from "../types/ha";
 
 const HA_USER_DATA_KEY = "homeAssistant";
 
@@ -7,8 +11,12 @@ type HomeAssistantObjectData = {
   objectId?: string;
   bindingGroupId?: string;
   entityId?: string;
+  deviceType?: HaManualDeviceType;
   bindings?: HaBinding[];
   isGroup?: boolean;
+  capabilities?: {
+    light?: HaLightCapabilityConfig;
+  };
 };
 
 function slugify(value: string) {
@@ -48,6 +56,32 @@ export function getObjectBindings(object: THREE.Object3D) {
 
 export function setObjectBindings(object: THREE.Object3D, bindings: HaBinding[]) {
   getHomeAssistantData(object).bindings = bindings;
+}
+
+export function getManualDeviceType(object: THREE.Object3D): HaManualDeviceType {
+  return getHomeAssistantData(object).deviceType ?? "auto";
+}
+
+export function setManualDeviceType(
+  object: THREE.Object3D,
+  deviceType: HaManualDeviceType,
+) {
+  getHomeAssistantData(object).deviceType = deviceType;
+}
+
+export function getLightCapabilityConfig(object: THREE.Object3D) {
+  return getHomeAssistantData(object).capabilities?.light ?? null;
+}
+
+export function setLightCapabilityConfig(
+  object: THREE.Object3D,
+  config: HaLightCapabilityConfig,
+) {
+  const data = getHomeAssistantData(object);
+  data.capabilities = {
+    ...data.capabilities,
+    light: config,
+  };
 }
 
 export function isModelGroup(object: THREE.Object3D) {

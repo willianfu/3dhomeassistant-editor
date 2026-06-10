@@ -22,6 +22,19 @@ export type HaDevice = {
   area_id?: string;
 };
 
+export type HaManualDeviceType =
+  | "auto"
+  | "light"
+  | "cover"
+  | "climate"
+  | "switch"
+  | "button"
+  | "fan"
+  | "sensor"
+  | "number"
+  | "select"
+  | "text";
+
 export type HaBinding =
   | {
       type: "entity";
@@ -32,6 +45,20 @@ export type HaBinding =
       deviceId: string;
       entityIds: string[];
     };
+
+export type HaLightCapabilityConfig = {
+  enabled: boolean;
+  lightType: "point" | "spot" | "area";
+  emissionMode: "whole" | "bottom";
+  coneAngle: number;
+  maxIntensity: number;
+  lightRange: number;
+  maxBrightness: number;
+  fixedColorTemperatureKelvin: number;
+  powerEntityId?: string;
+  brightnessEntityId?: string;
+  colorTemperatureEntityId?: string;
+};
 
 export type HaServiceTarget = {
   entity_id: string;

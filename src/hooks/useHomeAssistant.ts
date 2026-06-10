@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HomeAssistantWsClient, getEntityDomain } from "../lib/ha-client";
 import { getHaRuntimeConfig } from "../lib/ha-config";
+import { applySimulatedServiceCall } from "../lib/ha-simulator";
 import type { HaConnectionStatus, HaDevice, HaEntityState } from "../types/ha";
 
 export function useHomeAssistant() {
@@ -77,13 +78,21 @@ export function useHomeAssistant() {
       service: string,
       serviceData: Record<string, unknown> = {},
     ) => {
+      setStates((current) =>
+        applySimulatedServiceCall(current, entityId, service, serviceData),
+      );
       const client = clientRef.current;
       if (!client) {
         return;
       }
-      await client.callService(getEntityDomain(entityId), service, {
-        entity_id: entityId,
-      }, serviceData);
+      try {
+        await client.callService(getEntityDomain(entityId), service, {
+          entity_id: entityId,
+        }, serviceData);
+      } catch {
+        setStatus((current) => (current === "connected" ? "error" : current));
+        setStatusMessage("Home Assistant service call failed, using local simulation");
+      }
     },
     [],
   );

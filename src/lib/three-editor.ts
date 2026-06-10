@@ -4,15 +4,25 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import type { EnvironmentConfig, Vector3Values, ViewMode } from "../types/editor";
-import type { HaBinding, HaEntityState } from "../types/ha";
+import type {
+  HaBinding,
+  HaEntityState,
+  HaLightCapabilityConfig,
+  HaManualDeviceType,
+} from "../types/ha";
 import { defaultEnvironment } from "../types/editor";
 import { EditorHistory, type EditorHistoryState } from "./editor-history";
+import { resolveLightCapability } from "./ha-capabilities/light";
 import { getBoundEntityIds } from "./ha-bindings";
 import { groupObjectsPreservingWorldTransform } from "./model-grouping";
 import {
   ensureModelObjectIds,
+  getLightCapabilityConfig,
+  setManualDeviceType,
   getObjectBindings,
+  setLightCapabilityConfig,
   setObjectBindings,
 } from "./model-identity";
 import { computeOrthoFrustum } from "./ortho-frustum";
@@ -38,6 +48,38 @@ type ObjectSnapshot = {
   rotation: THREE.Euler;
   scale: THREE.Vector3;
 };
+
+type HaLightObject = THREE.PointLight | THREE.SpotLight | THREE.RectAreaLight;
+
+type HaLightRig = {
+  type: HaLightCapabilityConfig["lightType"];
+  group: THREE.Group;
+  light: HaLightObject;
+};
+
+function colorTemperatureToColor(kelvin: number) {
+  const temperature = THREE.MathUtils.clamp(kelvin, 1000, 12000) / 100;
+  const red =
+    temperature <= 66
+      ? 255
+      : 329.698727446 * (temperature - 60) ** -0.1332047592;
+  const green =
+    temperature <= 66
+      ? 99.4708025861 * Math.log(temperature) - 161.1195681661
+      : 288.1221695283 * (temperature - 60) ** -0.0755148492;
+  const blue =
+    temperature >= 66
+      ? 255
+      : temperature <= 19
+        ? 0
+        : 138.5177312231 * Math.log(temperature - 10) - 305.0447927307;
+
+  return new THREE.Color(
+    THREE.MathUtils.clamp(red, 0, 255) / 255,
+    THREE.MathUtils.clamp(green, 0, 255) / 255,
+    THREE.MathUtils.clamp(blue, 0, 255) / 255,
+  );
+}
 
 export class ThreeEditor {
   private readonly container: HTMLElement;
@@ -69,7 +111,7 @@ export class ThreeEditor {
   private modelRoot: THREE.Object3D | null = null;
   private objectMap = new Map<string, THREE.Object3D>();
   private originalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
-  private haLights = new Map<string, THREE.PointLight>();
+  private haLights = new Map<string, HaLightRig>();
   private wallOriginalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private selectedIds = new Set<string>();
   private selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x29d3c4);
@@ -92,6 +134,7 @@ export class ThreeEditor {
   }
 
   init() {
+    RectAreaLightUniformsLib.init();
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
@@ -184,6 +227,7 @@ export class ThreeEditor {
     if (this.modelRoot) {
       disposeObjectTree(this.modelRoot);
     }
+    this.clearHaLights();
     this.grid.geometry.dispose();
     this.selectionBox.geometry.dispose();
     this.clearMultiSelectionHelpers();
@@ -329,6 +373,7 @@ export class ThreeEditor {
       .filter((object) => object !== this.modelRoot && Boolean(object.parent));
 
     for (const object of objects) {
+      this.clearHaLightForObject(object.uuid);
       object.parent?.remove(object);
       disposeObjectTree(object);
       deleted = true;
@@ -509,6 +554,73 @@ export class ThreeEditor {
     return this.getSelectedObjects().flatMap((object) => getObjectBindings(object));
   }
 
+  getBindingsForObjects(objectIds: string[]) {
+    return objectIds
+      .map((id) => this.objectMap.get(id))
+      .filter((object): object is THREE.Object3D => Boolean(object))
+      .flatMap((object) => getObjectBindings(object));
+  }
+
+  getLightCapabilityForObjects(objectIds: string[]) {
+    for (const objectId of objectIds) {
+      const object = this.objectMap.get(objectId);
+      if (!object) {
+        continue;
+      }
+      const config = getLightCapabilityConfig(object);
+      if (config) {
+        return config;
+      }
+    }
+    return null;
+  }
+
+  updateLightCapabilityForSelection(config: HaLightCapabilityConfig) {
+    const objects = this.getSelectedObjects();
+    if (objects.length === 0) {
+      return;
+    }
+    for (const object of objects) {
+      setLightCapabilityConfig(object, config);
+    }
+    this.history.push({
+      label: "配置灯光能力",
+      undo: () => undefined,
+      redo: () => undefined,
+    });
+    this.options.onHistoryChange?.(this.history.getState());
+    this.options.onModelChange?.();
+  }
+
+  updateManualDeviceTypeForSelection(deviceType: HaManualDeviceType) {
+    const objects = this.getSelectedObjects();
+    if (objects.length === 0) {
+      return;
+    }
+    for (const object of objects) {
+      setManualDeviceType(object, deviceType);
+      if (deviceType === "light" && !getLightCapabilityConfig(object)) {
+        setLightCapabilityConfig(object, {
+          enabled: true,
+          lightType: "point",
+          emissionMode: "whole",
+          coneAngle: 45,
+          maxIntensity: 8,
+          lightRange: 14,
+          maxBrightness: 255,
+          fixedColorTemperatureKelvin: 3000,
+        });
+      }
+    }
+    this.history.push({
+      label: "配置设备类型",
+      undo: () => undefined,
+      redo: () => undefined,
+    });
+    this.options.onHistoryChange?.(this.history.getState());
+    this.options.onModelChange?.();
+  }
+
   updateBindingsForSelection(bindings: HaBinding[]) {
     const objects = this.getSelectedObjects();
     if (objects.length === 0) {
@@ -530,20 +642,21 @@ export class ThreeEditor {
     if (!this.modelRoot) {
       return;
     }
-    const activeLightEntities = new Set(
-      Object.values(states)
-        .filter((state) => state.entity_id.startsWith("light.") && state.state === "on")
-        .map((state) => state.entity_id),
-    );
 
     this.modelRoot.traverse((object) => {
       const bindings = getObjectBindings(object);
+      const lightConfig = getLightCapabilityConfig(object);
+      if (bindings.length === 0 && !lightConfig) {
+        return;
+      }
       const boundEntityIds = getBoundEntityIds(bindings);
-      const activeEntityId = boundEntityIds.find((entityId) =>
-        activeLightEntities.has(entityId),
-      );
-      if (activeEntityId) {
-        this.enableObjectEmission(object, states[activeEntityId]);
+      const light = resolveLightCapability({
+        config: lightConfig,
+        entityIds: boundEntityIds,
+        states,
+      });
+      if (light.enabled && light.isOn) {
+        this.enableObjectEmission(object, light);
       } else {
         this.disableObjectEmission(object);
       }
@@ -551,19 +664,45 @@ export class ThreeEditor {
   }
 
   getSelectionScreenAnchor() {
+    return this.getScreenAnchorForObjects([...this.selectedIds]);
+  }
+
+  getScreenAnchorForObjects(objectIds: string[]) {
     if (!this.renderer) {
       return null;
     }
-    const box = this.getSelectionBox();
+    const objects = objectIds
+      .map((id) => this.objectMap.get(id))
+      .filter((object): object is THREE.Object3D => Boolean(object));
+    const box = this.getSelectionBox(objects);
     if (!box) {
       return null;
     }
-    const center = box.getCenter(new THREE.Vector3());
-    const projected = center.project(this.getActiveCamera());
     const rect = this.renderer.domElement.getBoundingClientRect();
+    const camera = this.getActiveCamera();
+    const corners = [
+      new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ];
+    const points = corners.map((corner) => {
+      const projected = corner.project(camera);
+      return {
+        x: rect.left + ((projected.x + 1) / 2) * rect.width,
+        y: rect.top + ((1 - projected.y) / 2) * rect.height,
+      };
+    });
+    const minX = Math.min(...points.map((point) => point.x));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
     return {
-      x: rect.left + ((projected.x + 1) / 2) * rect.width,
-      y: rect.top + ((1 - projected.y) / 2) * rect.height,
+      x: (minX + maxX) / 2,
+      y: minY,
     };
   }
 
@@ -658,6 +797,8 @@ export class ThreeEditor {
   private clearModel() {
     this.selectObject(null);
     this.restoreWallTransparency();
+    this.clearHaLights();
+    this.originalMaterials.clear();
     if (this.modelRoot) {
       this.scene.remove(this.modelRoot);
       disposeObjectTree(this.modelRoot);
@@ -678,9 +819,37 @@ export class ThreeEditor {
         const mesh = node as THREE.Mesh;
         mesh.castShadow = false;
         mesh.receiveShadow = true;
+        mesh.material = this.ensureLightReactiveMaterial(mesh.material);
         mesh.userData.selectable = true;
       }
     });
+  }
+
+  private ensureLightReactiveMaterial(
+    material: THREE.Material | THREE.Material[],
+  ): THREE.Material | THREE.Material[] {
+    if (Array.isArray(material)) {
+      return material.map((entry) => this.ensureLightReactiveMaterial(entry) as THREE.Material);
+    }
+    if (material instanceof THREE.MeshBasicMaterial) {
+      const next = new THREE.MeshStandardMaterial({
+        name: material.name,
+        color: material.color,
+        map: material.map,
+        alphaMap: material.alphaMap,
+        aoMap: material.aoMap,
+        opacity: material.opacity,
+        transparent: material.transparent,
+        side: material.side,
+        depthWrite: material.depthWrite,
+        depthTest: material.depthTest,
+        roughness: 0.72,
+        metalness: 0.02,
+      });
+      material.dispose();
+      return next;
+    }
+    return material;
   }
 
   private rebuildObjectMap() {
@@ -1182,17 +1351,16 @@ export class ThreeEditor {
     this.options.onModelChange?.();
   }
 
-  private enableObjectEmission(object: THREE.Object3D, state: HaEntityState) {
-    const brightness = Number(state.attributes.brightness ?? 180);
-    const intensity = Math.max(0.35, Math.min(brightness / 160, 2.2));
-    const rgb = Array.isArray(state.attributes.rgb_color)
-      ? (state.attributes.rgb_color as number[])
-      : [255, 236, 190];
-    const color = new THREE.Color(
-      (rgb[0] ?? 255) / 255,
-      (rgb[1] ?? 236) / 255,
-      (rgb[2] ?? 190) / 255,
+  private enableObjectEmission(
+    object: THREE.Object3D,
+    lightConfig: ReturnType<typeof resolveLightCapability>,
+  ) {
+    const emissiveIntensity = Math.max(
+      0.05,
+      lightConfig.brightnessRatio * lightConfig.maxIntensity,
     );
+    const lightIntensity = emissiveIntensity * 8;
+    const color = colorTemperatureToColor(lightConfig.colorTemperatureKelvin);
 
     object.traverse((node) => {
       const mesh = node as THREE.Mesh;
@@ -1210,23 +1378,133 @@ export class ThreeEditor {
         const standard = material as THREE.MeshStandardMaterial;
         if ("emissive" in standard) {
           standard.emissive.copy(color);
-          standard.emissiveIntensity = intensity;
+          standard.emissiveIntensity = emissiveIntensity;
           standard.needsUpdate = true;
         }
       }
     });
 
-    let light = this.haLights.get(object.uuid);
-    if (!light) {
-      light = new THREE.PointLight(color, intensity * 1.4, 8, 2);
-      this.haLights.set(object.uuid, light);
-      this.scene.add(light);
-    }
+    const rig = this.ensureHaLightRig(object.uuid, lightConfig.lightType);
+    rig.group.visible = true;
     const box = new THREE.Box3().setFromObject(object);
-    light.position.copy(box.getCenter(new THREE.Vector3()));
-    light.color.copy(color);
-    light.intensity = intensity * 1.4;
-    light.visible = true;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const range = Math.max(lightConfig.lightRange, 1);
+    const yOffset = Math.max(size.y * 0.18, 0.12);
+    const bottomOffset = Math.max(size.y * 0.08, 0.08);
+    rig.light.color.copy(color);
+    rig.light.visible = true;
+
+    if (lightConfig.lightType === "spot") {
+      const spot = rig.light as THREE.SpotLight;
+      spot.position.set(center.x, box.max.y + yOffset, center.z);
+      spot.intensity = lightIntensity * 2.2;
+      spot.angle = THREE.MathUtils.degToRad(lightConfig.coneAngle);
+      spot.penumbra = 0.58;
+      spot.distance = range;
+      spot.decay = 1.25;
+      spot.target.position.set(
+        center.x,
+        lightConfig.emissionMode === "bottom" ? box.min.y - 1 : center.y,
+        center.z,
+      );
+      spot.target.updateMatrixWorld();
+      return;
+    }
+
+    if (lightConfig.lightType === "area") {
+      const area = rig.light as THREE.RectAreaLight;
+      area.position.set(
+        center.x,
+        lightConfig.emissionMode === "bottom" ? box.min.y - bottomOffset : box.max.y + yOffset,
+        center.z,
+      );
+      area.width = Math.max(size.x, 0.6);
+      area.height = Math.max(size.z, 0.6);
+      area.intensity = lightIntensity * 4;
+      area.lookAt(
+        center.x,
+        lightConfig.emissionMode === "bottom" ? box.min.y - 1 : center.y,
+        center.z,
+      );
+      return;
+    }
+
+    const point = rig.light as THREE.PointLight;
+    point.position.copy(
+      lightConfig.emissionMode === "bottom"
+        ? new THREE.Vector3(center.x, box.min.y - bottomOffset, center.z)
+        : new THREE.Vector3(center.x, center.y, center.z),
+    );
+    point.intensity = lightIntensity;
+    point.distance = range;
+    point.decay = 1;
+  }
+
+  private ensureHaLightRig(uuid: string, type: HaLightCapabilityConfig["lightType"]) {
+    const existing = this.haLights.get(uuid);
+    if (existing?.type === type) {
+      return existing;
+    }
+    if (existing) {
+      this.disposeHaLightRig(existing);
+      this.haLights.delete(uuid);
+    }
+
+    const group = new THREE.Group();
+    group.name = `HA light rig ${uuid}`;
+    let light: HaLightObject;
+    if (type === "spot") {
+      const spot = new THREE.SpotLight(
+        0xffffff,
+        1,
+        12,
+        THREE.MathUtils.degToRad(45),
+        0.58,
+        1.25,
+      );
+      spot.castShadow = false;
+      group.add(spot);
+      group.add(spot.target);
+      light = spot;
+    } else if (type === "area") {
+      const area = new THREE.RectAreaLight(0xffffff, 1, 1, 1);
+      area.castShadow = false;
+      group.add(area);
+      light = area;
+    } else {
+      const point = new THREE.PointLight(0xffffff, 1, 12, 1);
+      point.castShadow = false;
+      group.add(point);
+      light = point;
+    }
+
+    this.scene.add(group);
+    const rig = { type, group, light };
+    this.haLights.set(uuid, rig);
+    return rig;
+  }
+
+  private disposeHaLightRig(rig: HaLightRig) {
+    this.scene.remove(rig.group);
+    rig.light.dispose();
+    rig.group.clear();
+  }
+
+  private clearHaLights() {
+    for (const rig of this.haLights.values()) {
+      this.disposeHaLightRig(rig);
+    }
+    this.haLights.clear();
+  }
+
+  private clearHaLightForObject(uuid: string) {
+    const rig = this.haLights.get(uuid);
+    if (!rig) {
+      return;
+    }
+    this.disposeHaLightRig(rig);
+    this.haLights.delete(uuid);
   }
 
   private disableObjectEmission(object: THREE.Object3D) {
@@ -1246,9 +1524,9 @@ export class ThreeEditor {
       mesh.material = original;
       this.originalMaterials.delete(mesh.uuid);
     });
-    const light = this.haLights.get(object.uuid);
-    if (light) {
-      light.visible = false;
+    const rig = this.haLights.get(object.uuid);
+    if (rig) {
+      rig.group.visible = false;
     }
   }
 
