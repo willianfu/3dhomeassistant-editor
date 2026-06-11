@@ -67,6 +67,7 @@
 - 支持批量选择与批量删除
 - Draco 解码器内置，支持压缩 GLB
 - 天气系统模拟室外天气环境、昼夜
+- 绑定HA内的设备实时同步环境
 
 ## 技术栈
 
@@ -80,6 +81,21 @@
 
 ## 快速开始
 
+### 配置HA令牌及连接信息
+
+在项目根目录下创建一个`.env` 环境配置文件，填入下面的信息
+
+```bash
+#你的homeassistant地址
+VITE_HA_API=http://xxxxx:8123
+#你的homeassistant长期访问令牌
+VITE_HA_KEY=eyJhbGciOiJIUzI1xxxxx
+```
+
+以上信息请自行从HA内获得，如果不体验设备控制功能可不配置
+
+### 启动项目
+
 ```bash
 npm install
 npm run dev
@@ -91,18 +107,9 @@ npm run dev
 http://127.0.0.1:5173/
 ```
 
-## 常用命令
-
-```bash
-npm run dev
-npm test
-npm run build
-npm run preview
-```
-
 ## 使用说明
 
-1. 点击顶部“上传”，选择 `.glb` 或 `.gltf` 文件。
+1. 点击顶部“上传”，选择 `.glb` 或 `.gltf` 文件（也可点击`加载示例` 按钮，加载演示模型）。
 2. 左侧零件树会显示原始模型层级。
 3. 点击树节点或 3D 模型可选中零件。
 4. 在右侧“模型信息”中查看零件信息或调整位置。
