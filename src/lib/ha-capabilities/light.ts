@@ -14,6 +14,20 @@ export type ResolvedLightCapability = {
   lightRange: number;
 };
 
+export type HaLightControlCapabilities = {
+  brightnessPercent: number;
+  colorTemperatureKelvin: number;
+  minColorTemperatureKelvin: number;
+  maxColorTemperatureKelvin: number;
+  effect: string | null;
+  effects: string[];
+  supportsBrightness: boolean;
+  supportsColorTemperature: boolean;
+  supportsEffect: boolean;
+};
+
+const lightSourceIntensityMultiplier = 10;
+
 export function defaultLightCapabilityConfig(): HaLightCapabilityConfig {
   return {
     enabled: false,
@@ -60,6 +74,79 @@ function lightColorTemperatureKelvin(state?: HaEntityState) {
     return Math.round(1_000_000 / mired);
   }
   return null;
+}
+
+function numericAttribute(state: HaEntityState | undefined, key: string) {
+  const value = Number(state?.attributes[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function hasSupportedColorMode(state: HaEntityState | undefined, mode: string) {
+  const modes = state?.attributes.supported_color_modes;
+  return Array.isArray(modes) && modes.map(String).includes(mode);
+}
+
+export function brightnessToPercent(brightness: number | null) {
+  if (brightness === null) {
+    return 100;
+  }
+  return clamp(Math.round((brightness / 255) * 100), 1, 100);
+}
+
+export function percentToBrightness(percent: number) {
+  return clamp(Math.round((clamp(percent, 1, 100) / 100) * 255), 1, 255);
+}
+
+export function resolveHaLightControlCapabilities(
+  state?: HaEntityState,
+): HaLightControlCapabilities {
+  const brightness = numericAttribute(state, "brightness");
+  const minMireds = numericAttribute(state, "min_mireds");
+  const maxMireds = numericAttribute(state, "max_mireds");
+  const minKelvin =
+    numericAttribute(state, "min_color_temp_kelvin") ??
+    numericAttribute(state, "min_color_temp") ??
+    (maxMireds && maxMireds > 0 ? Math.round(1_000_000 / maxMireds) : null) ??
+    1800;
+  const maxKelvin =
+    numericAttribute(state, "max_color_temp_kelvin") ??
+    numericAttribute(state, "max_color_temp") ??
+    (minMireds && minMireds > 0 ? Math.round(1_000_000 / minMireds) : null) ??
+    6500;
+  const rawEffects = state?.attributes.effect_list;
+  const effects = Array.isArray(rawEffects)
+    ? rawEffects.map(String).filter((effect) => effect.length > 0)
+    : [];
+  const supportedFeatures = Number(state?.attributes.supported_features ?? 0);
+  const supportsBrightness =
+    brightness !== null ||
+    hasSupportedColorMode(state, "brightness") ||
+    hasSupportedColorMode(state, "color_temp") ||
+    hasSupportedColorMode(state, "hs") ||
+    hasSupportedColorMode(state, "rgb") ||
+    hasSupportedColorMode(state, "xy");
+  const supportsColorTemperature =
+    hasSupportedColorMode(state, "color_temp") ||
+    state?.attributes.color_temp_kelvin !== undefined ||
+    state?.attributes.color_temp !== undefined ||
+    state?.attributes.min_color_temp_kelvin !== undefined ||
+    state?.attributes.max_color_temp_kelvin !== undefined;
+
+  return {
+    brightnessPercent: brightnessToPercent(brightness),
+    colorTemperatureKelvin:
+      lightColorTemperatureKelvin(state) ?? Math.round((minKelvin + maxKelvin) / 2),
+    minColorTemperatureKelvin: Math.min(minKelvin, maxKelvin),
+    maxColorTemperatureKelvin: Math.max(minKelvin, maxKelvin),
+    effect:
+      state?.attributes.effect === undefined
+        ? null
+        : String(state.attributes.effect),
+    effects,
+    supportsBrightness,
+    supportsColorTemperature,
+    supportsEffect: effects.length > 0 || (supportedFeatures & 4) === 4,
+  };
 }
 
 export function resolveLightCapability({
@@ -123,5 +210,16 @@ export function resolveLightCapability({
     coneAngle: mergedConfig.coneAngle,
     maxIntensity: mergedConfig.maxIntensity,
     lightRange: mergedConfig.lightRange,
+  };
+}
+
+export function resolveLightRenderIntensity(lightConfig: ResolvedLightCapability) {
+  const emissiveIntensity = Math.max(
+    0.05,
+    lightConfig.brightnessRatio * lightConfig.maxIntensity,
+  );
+  return {
+    emissiveIntensity,
+    lightIntensity: emissiveIntensity * lightSourceIntensityMultiplier,
   };
 }

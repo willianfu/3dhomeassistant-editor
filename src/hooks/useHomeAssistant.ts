@@ -13,12 +13,13 @@ export function useHomeAssistant() {
   const [devices, setDevices] = useState<HaDevice[]>([]);
   const [deviceEntities, setDeviceEntities] = useState<Record<string, string[]>>({});
 
-  useEffect(() => {
+  const connect = useCallback(() => {
     if (!config.apiUrl || !config.token) {
       setStatus("not_configured");
+      setStatusMessage("");
       return;
     }
-
+    clientRef.current?.close();
     const client = new HomeAssistantWsClient({
       url: config.apiUrl,
       token: config.token,
@@ -32,12 +33,16 @@ export function useHomeAssistant() {
     });
     clientRef.current = client;
     client.connect();
+  }, [config.apiUrl, config.token]);
+
+  useEffect(() => {
+    connect();
 
     return () => {
-      client.close();
+      clientRef.current?.close();
       clientRef.current = null;
     };
-  }, [config.apiUrl, config.token]);
+  }, [connect]);
 
   const refresh = useCallback(async () => {
     const client = clientRef.current;
@@ -105,6 +110,7 @@ export function useHomeAssistant() {
     devices,
     deviceEntities,
     refresh,
+    retryConnection: connect,
     loadDeviceEntities,
     callEntity,
   };

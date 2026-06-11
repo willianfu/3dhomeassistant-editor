@@ -4,6 +4,8 @@ import {
   Download,
   Eye,
   EyeOff,
+  Maximize2,
+  Minimize2,
   CloudSun,
   PanelLeftClose,
   PanelLeftOpen,
@@ -18,6 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { EditorHistoryState } from "../../lib/editor-history";
+import { canRetryHaConnection } from "../../lib/ha-status";
 import { cn } from "../../lib/utils";
 import {
   WEATHER_OPTIONS,
@@ -46,9 +49,12 @@ type TopToolbarProps = {
   haStatus: HaConnectionStatus;
   haStatusMessage: string;
   weather: WeatherConfig;
+  fullscreen: boolean;
   onUploadClick: () => void;
   onExport: () => void;
   onTogglePreview: () => void;
+  onToggleFullscreen: () => void;
+  onRetryHaConnection: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onWeatherChange: (weather: WeatherConfig) => void;
@@ -89,9 +95,11 @@ function IconButton({
 function HaStatus({
   status,
   message,
+  onRetry,
 }: {
   status: HaConnectionStatus;
   message: string;
+  onRetry: () => void;
 }) {
   const label =
     status === "connected"
@@ -100,19 +108,35 @@ function HaStatus({
         ? "未配置"
         : "未连接";
 
+  const canRetry = canRetryHaConnection(status);
+
   return (
-    <div
-      className="flex h-8 shrink-0 items-center gap-2 rounded-md px-2 text-xs text-muted-foreground"
+    <button
+      type="button"
+      className={cn(
+        "flex h-8 shrink-0 items-center gap-2 rounded-md px-2 text-xs text-muted-foreground transition-colors",
+        canRetry ? "hover:bg-accent hover:text-accent-foreground" : "cursor-default",
+      )}
       title={message || status}
+      onClick={() => {
+        if (canRetry) {
+          onRetry();
+        }
+      }}
+      disabled={!canRetry}
     >
       <span
         className={cn(
           "size-2 rounded-full shadow-[0_0_10px_currentColor]",
-          status === "connected" ? "bg-emerald-400 text-emerald-400" : "bg-destructive text-destructive",
+          status === "connected"
+            ? "bg-emerald-400 text-emerald-400"
+            : status === "connecting"
+              ? "bg-yellow-400 text-yellow-400"
+              : "bg-destructive text-destructive",
         )}
       />
       HA {label}
-    </div>
+    </button>
   );
 }
 
@@ -200,9 +224,12 @@ export function TopToolbar({
   haStatus,
   haStatusMessage,
   weather,
+  fullscreen,
   onUploadClick,
   onExport,
   onTogglePreview,
+  onToggleFullscreen,
+  onRetryHaConnection,
   onUndo,
   onRedo,
   onWeatherChange,
@@ -234,8 +261,18 @@ export function TopToolbar({
         </div>
 
         <div className="flex items-center gap-2">
-          <HaStatus status={haStatus} message={haStatusMessage} />
+          <HaStatus
+            status={haStatus}
+            message={haStatusMessage}
+            onRetry={onRetryHaConnection}
+          />
           <WeatherMenu weather={weather} onChange={onWeatherChange} />
+          <IconButton
+            label={fullscreen ? "退出全屏" : "全屏显示"}
+            onClick={onToggleFullscreen}
+          >
+            {fullscreen ? <Minimize2 /> : <Maximize2 />}
+          </IconButton>
           {previewMode ? (
             <Button
               variant="default"

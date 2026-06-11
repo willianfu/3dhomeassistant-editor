@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EditorHistoryState } from "../../lib/editor-history";
 import { ThreeEditor } from "../../lib/three-editor";
 import type { ViewMode } from "../../types/editor";
@@ -34,6 +34,7 @@ export function Viewport({
     onLoadProgress,
   });
   const editorRef = useRef<ThreeEditor | null>(null);
+  const [fps, setFps] = useState<number | null>(null);
 
   useEffect(() => {
     callbacksRef.current = {
@@ -53,6 +54,7 @@ export function Viewport({
       onModelChange: () => callbacksRef.current.onModelChange(),
       onHistoryChange: (state) => callbacksRef.current.onHistoryChange(state),
       onLoadProgress: (progress) => callbacksRef.current.onLoadProgress(progress),
+      onFpsChange: setFps,
     });
     editor.init();
     editorRef.current = editor;
@@ -95,6 +97,11 @@ export function Viewport({
       {error ? (
         <div className="absolute bottom-4 left-1/2 max-w-[520px] -translate-x-1/2 rounded-md border border-destructive/60 bg-destructive/15 px-4 py-2 text-sm text-destructive-foreground shadow-xl backdrop-blur">
           {error}
+        </div>
+      ) : null}
+      {fps !== null ? (
+        <div className="pointer-events-none absolute bottom-2 left-2 select-none rounded bg-background/25 px-1.5 py-0.5 font-mono text-[10px] leading-none text-muted-foreground/55">
+          {fps} fps
         </div>
       ) : null}
     </section>

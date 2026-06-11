@@ -38,8 +38,18 @@ import type {
 } from "../types/ha";
 import { defaultEnvironment } from "../types/editor";
 import { EditorHistory, type EditorHistoryState } from "./editor-history";
-import { resolveLightCapability } from "./ha-capabilities/light";
+import {
+  applyEditorLocalConfig,
+  createEditorLocalConfig,
+  type EditorLocalConfig,
+} from "./editor-local-config";
+import { FpsMeter } from "./fps-meter";
+import {
+  resolveLightCapability,
+  resolveLightRenderIntensity,
+} from "./ha-capabilities/light";
 import { getBoundEntityIds } from "./ha-bindings";
+import { resolveHaPanelMarkerPosition } from "./ha-panel-marker";
 import { groupObjectsPreservingWorldTransform } from "./model-grouping";
 import {
   ensureModelObjectIds,
@@ -61,6 +71,7 @@ export type ThreeEditorOptions = {
   onModelChange?: () => void;
   onHistoryChange?: (state: EditorHistoryState) => void;
   onLoadProgress?: (progress: number) => void;
+  onFpsChange?: (fps: number) => void;
 };
 
 type ObjectSnapshot = {
@@ -81,14 +92,24 @@ type HaLightRig = {
   light: HaLightObject;
 };
 
+type HaPanelMarker = {
+  group: THREE.Group;
+  core: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  halo: THREE.Sprite;
+  objectIds: string[];
+  baseScale: number;
+};
+
 type WeatherLineEffect = {
-  object: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  object: THREE.LineSegments<THREE.BufferGeometry, THREE.ShaderMaterial>;
   positions: Float32Array;
   count: number;
   kind: "rain" | "wind";
   speed: number;
   drift: number;
   length: number;
+  travelOffset: number;
+  driftOffset: number;
   bounds: {
     minX: number;
     maxX: number;
@@ -173,6 +194,7 @@ export class ThreeEditor {
   private objectMap = new Map<string, THREE.Object3D>();
   private originalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private haLights = new Map<string, HaLightRig>();
+  private haPanelMarkers = new Map<string, HaPanelMarker>();
   private wallOriginalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private weatherConfig: WeatherConfig = defaultWeather;
   private weatherGroup = new THREE.Group();
@@ -187,6 +209,7 @@ export class ThreeEditor {
   private weatherLightningBurstFrames = 0;
   private weatherLightningCooldownFrames = 0;
   private lastFrameTime = 0;
+  private fpsMeter = new FpsMeter();
   private selectedIds = new Set<string>();
   private selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x29d3c4);
   private multiSelectionGroup = new THREE.Group();
@@ -301,6 +324,7 @@ export class ThreeEditor {
     window.removeEventListener("pointerup", this.handlePointerUp);
     this.restoreWallTransparency();
     this.clearWeatherEffects();
+    this.clearHaPanelMarkers();
     if (this.modelRoot) {
       disposeObjectTree(this.modelRoot);
     }
@@ -629,6 +653,22 @@ export class ThreeEditor {
     return this.history.getState();
   }
 
+  createLocalConfig(environment: EnvironmentConfig, weather: WeatherConfig) {
+    if (!this.modelRoot) {
+      return null;
+    }
+    return createEditorLocalConfig(this.modelRoot, environment, weather);
+  }
+
+  applyLocalConfig(config: EditorLocalConfig | null) {
+    if (!this.modelRoot) {
+      return;
+    }
+    applyEditorLocalConfig(this.modelRoot, config);
+    this.rebuildObjectMap();
+    this.options.onModelChange?.();
+  }
+
   getSelectedBindings() {
     return this.getSelectedObjects().flatMap((object) => getObjectBindings(object));
   }
@@ -785,6 +825,29 @@ export class ThreeEditor {
     };
   }
 
+  setHaPanelMarkers(markers: Array<{ id: string; objectIds: string[] }>) {
+    const nextIds = new Set(markers.map((marker) => marker.id));
+    for (const [id, marker] of this.haPanelMarkers) {
+      if (!nextIds.has(id)) {
+        this.disposeHaPanelMarker(marker);
+        this.haPanelMarkers.delete(id);
+      }
+    }
+
+    for (const marker of markers) {
+      const existing = this.haPanelMarkers.get(marker.id);
+      if (existing) {
+        existing.objectIds = marker.objectIds;
+        continue;
+      }
+      this.haPanelMarkers.set(
+        marker.id,
+        this.createHaPanelMarker(marker.id, marker.objectIds),
+      );
+    }
+    this.updateHaPanelMarkers(performance.now());
+  }
+
   markSaved() {
     this.history.markSaved();
     this.options.onHistoryChange?.(this.history.getState());
@@ -882,6 +945,7 @@ export class ThreeEditor {
     this.selectObject(null);
     this.restoreWallTransparency();
     this.clearHaLights();
+    this.clearHaPanelMarkers();
     this.originalMaterials.clear();
     if (this.modelRoot) {
       this.scene.remove(this.modelRoot);
@@ -1102,9 +1166,15 @@ export class ThreeEditor {
     if (this.destroyed || !this.renderer || !this.camera) {
       return;
     }
+    const now = performance.now();
+    const fps = this.fpsMeter.sample(now);
+    if (fps !== null) {
+      this.options.onFpsChange?.(fps);
+    }
     this.resizeIfNeeded();
     this.controls?.update();
     this.updateWeatherEffects();
+    this.updateHaPanelMarkers(now);
     this.renderer.render(this.scene, this.getActiveCamera());
     this.animationFrame = requestAnimationFrame(this.animate);
   };
@@ -1452,7 +1522,7 @@ export class ThreeEditor {
         speed: resolveWeatherRainSpeed(preset.rain.speed, sceneSpan),
         drift: preset.rain.windDrift * weatherScale,
         opacity: preset.rain.opacity,
-        color: 0xb8e3ff,
+        color: 0xf4f1ea,
         length: resolveWeatherRainDropLength(
           preset.mode === "rain-light" ? 0.42 : 0.7,
           sceneSpan,
@@ -1567,30 +1637,106 @@ export class ThreeEditor {
       maxZ: weatherBounds.maxZ,
     };
     const positions = new Float32Array(count * 6);
+    const segmentStarts = new Float32Array(count * 6);
+    const segmentOffsets = new Float32Array(count * 6);
     for (let index = 0; index < count; index += 1) {
       const offset = index * 6;
       const x = THREE.MathUtils.lerp(bounds.minX, bounds.maxX, Math.random());
       const y = THREE.MathUtils.lerp(bounds.minY, bounds.maxY, Math.random());
       const z = THREE.MathUtils.lerp(bounds.minZ, bounds.maxZ, Math.random());
+      const endOffsetX = kind === "rain" ? drift * 8 : length;
+      const endOffsetY = kind === "rain" ? length : 0.05;
+      const endOffsetZ = kind === "rain" ? 0 : 0.08;
       positions[offset] = x;
       positions[offset + 1] = y;
       positions[offset + 2] = z;
-      positions[offset + 3] = kind === "rain" ? x + drift * 8 : x + length;
-      positions[offset + 4] = kind === "rain" ? y + length : y + 0.05;
-      positions[offset + 5] = kind === "rain" ? z : z + 0.08;
+      positions[offset + 3] = x + endOffsetX;
+      positions[offset + 4] = y + endOffsetY;
+      positions[offset + 5] = z + endOffsetZ;
+      segmentStarts.set([x, y, z, x, y, z], offset);
+      segmentOffsets.set([0, 0, 0, endOffsetX, endOffsetY, endOffsetZ], offset);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    const material = new THREE.LineBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      depthWrite: false,
-    });
+    geometry.setAttribute("aSegmentStart", new THREE.BufferAttribute(segmentStarts, 3));
+    geometry.setAttribute("aSegmentOffset", new THREE.BufferAttribute(segmentOffsets, 3));
+    const material = this.createWeatherLineMaterial(kind, color, opacity, bounds);
     const object = new THREE.LineSegments(geometry, material);
     object.frustumCulled = false;
     object.name = kind === "rain" ? "weather rain" : "weather wind";
-    return { object, positions, count, kind, speed, drift, length, bounds };
+    return {
+      object,
+      positions,
+      count,
+      kind,
+      speed,
+      drift,
+      length,
+      travelOffset: 0,
+      driftOffset: 0,
+      bounds,
+    };
+  }
+
+  private createWeatherLineMaterial(
+    kind: "rain" | "wind",
+    color: number,
+    opacity: number,
+    bounds: WeatherLineEffect["bounds"],
+  ) {
+    const wrapVertex =
+      kind === "rain"
+        ? `
+          movedStart.x = wrapValue(movedStart.x + uDriftOffset, uMinX, uMaxX);
+          movedStart.y = wrapValue(movedStart.y - uTravelOffset, uMinY, uMaxY);
+        `
+        : `
+          movedStart.x = wrapValue(movedStart.x + uTravelOffset, uMinX, uMaxX);
+        `;
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(color) },
+        uOpacity: { value: opacity },
+        uTravelOffset: { value: 0 },
+        uDriftOffset: { value: 0 },
+        uMinX: { value: bounds.minX },
+        uMaxX: { value: bounds.maxX },
+        uMinY: { value: bounds.minY },
+        uMaxY: { value: bounds.maxY },
+      },
+      vertexShader: `
+        attribute vec3 aSegmentStart;
+        attribute vec3 aSegmentOffset;
+        uniform float uTravelOffset;
+        uniform float uDriftOffset;
+        uniform float uMinX;
+        uniform float uMaxX;
+        uniform float uMinY;
+        uniform float uMaxY;
+
+        float wrapValue(float value, float minValue, float maxValue) {
+          float rangeValue = max(maxValue - minValue, 0.0001);
+          return minValue + mod(value - minValue, rangeValue);
+        }
+
+        void main() {
+          vec3 movedStart = aSegmentStart;
+          ${wrapVertex}
+          vec3 transformed = movedStart + aSegmentOffset;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+
+        void main() {
+          gl_FragColor = vec4(uColor, uOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+    });
   }
 
   private addWeatherClouds(
@@ -1704,6 +1850,102 @@ export class ThreeEditor {
     return texture;
   }
 
+  private createHaPanelMarker(id: string, objectIds: string[]): HaPanelMarker {
+    const group = new THREE.Group();
+    group.name = `HA active panel marker ${id}`;
+    group.userData.selectable = false;
+
+    const coreMaterial = new THREE.MeshBasicMaterial({
+      color: 0x4fffe2,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const core = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), coreMaterial);
+    core.userData.selectable = false;
+    core.renderOrder = 25;
+    group.add(core);
+
+    const haloMaterial = new THREE.SpriteMaterial({
+      map: this.createHaPanelMarkerTexture(),
+      color: 0x58fff0,
+      transparent: true,
+      opacity: 0.42,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const halo = new THREE.Sprite(haloMaterial);
+    halo.userData.selectable = false;
+    halo.renderOrder = 24;
+    group.add(halo);
+
+    this.scene.add(group);
+    return { group, core, halo, objectIds, baseScale: 0.6 };
+  }
+
+  private createHaPanelMarkerTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 96;
+    const context = canvas.getContext("2d");
+    if (context) {
+      const gradient = context.createRadialGradient(48, 48, 4, 48, 48, 46);
+      gradient.addColorStop(0, "rgba(255,255,255,0.95)");
+      gradient.addColorStop(0.28, "rgba(92,255,238,0.62)");
+      gradient.addColorStop(1, "rgba(92,255,238,0)");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  private updateHaPanelMarkers(now: number) {
+    if (this.haPanelMarkers.size === 0) {
+      return;
+    }
+    const pulse = (Math.sin(now * 0.006) + 1) / 2;
+    const beat = 0.72 + pulse * 0.28;
+    for (const [id, marker] of this.haPanelMarkers) {
+      const objects = marker.objectIds
+        .map((objectId) => this.objectMap.get(objectId))
+        .filter((object): object is THREE.Object3D => Boolean(object));
+      const position = resolveHaPanelMarkerPosition(objects);
+      if (!position) {
+        this.disposeHaPanelMarker(marker);
+        this.haPanelMarkers.delete(id);
+        continue;
+      }
+      marker.group.position.copy(position);
+      const scale = marker.baseScale * beat;
+      marker.core.scale.setScalar(scale);
+      marker.halo.scale.setScalar(marker.baseScale * (4.4 + pulse * 1.2));
+      marker.core.material.opacity = 0.72 + pulse * 0.22;
+      (marker.halo.material as THREE.SpriteMaterial).opacity = 0.24 + pulse * 0.24;
+    }
+  }
+
+  private disposeHaPanelMarker(marker: HaPanelMarker) {
+    this.scene.remove(marker.group);
+    marker.core.geometry.dispose();
+    marker.core.material.dispose();
+    const haloMaterial = marker.halo.material as THREE.SpriteMaterial;
+    haloMaterial.map?.dispose();
+    haloMaterial.dispose();
+    marker.group.clear();
+  }
+
+  private clearHaPanelMarkers() {
+    for (const marker of this.haPanelMarkers.values()) {
+      this.disposeHaPanelMarker(marker);
+    }
+    this.haPanelMarkers.clear();
+  }
+
   private addLightningEffect() {
     const bounds = this.getWeatherBounds();
     const span = Math.max(bounds.maxX - bounds.minX, bounds.maxZ - bounds.minZ, 24);
@@ -1796,6 +2038,14 @@ export class ThreeEditor {
     const now = performance.now();
     const delta = this.lastFrameTime > 0 ? Math.min((now - this.lastFrameTime) / 16.67, 3) : 1;
     this.lastFrameTime = now;
+    if (
+      !this.weatherRain &&
+      !this.weatherWind &&
+      this.weatherClouds.length === 0 &&
+      !this.weatherLightningLight
+    ) {
+      return;
+    }
     this.updateLineWeatherEffect(this.weatherRain, delta);
     this.updateLineWeatherEffect(this.weatherWind, delta);
     for (const cloud of this.weatherClouds) {
@@ -1811,44 +2061,16 @@ export class ThreeEditor {
     if (!effect) {
       return;
     }
-    const { positions, bounds } = effect;
-    for (let index = 0; index < effect.count; index += 1) {
-      const offset = index * 6;
-      if (effect.kind === "rain") {
-        let x = positions[offset] + effect.drift * delta;
-        let y = positions[offset + 1] - effect.speed * delta;
-        let z = positions[offset + 2];
-        if (y < bounds.minY) {
-          x = THREE.MathUtils.lerp(bounds.minX, bounds.maxX, Math.random());
-          y = bounds.maxY;
-          z = THREE.MathUtils.lerp(bounds.minZ, bounds.maxZ, Math.random());
-        }
-        if (x > bounds.maxX) {
-          x = bounds.minX;
-        }
-        positions[offset] = x;
-        positions[offset + 1] = y;
-        positions[offset + 2] = z;
-        positions[offset + 3] = x + effect.drift * 8;
-        positions[offset + 4] = y + effect.length;
-        positions[offset + 5] = z;
-      } else {
-        let x = positions[offset] + effect.speed * delta;
-        const y = positions[offset + 1];
-        const z = positions[offset + 2];
-        if (x > bounds.maxX) {
-          x = bounds.minX;
-        }
-        positions[offset] = x;
-        positions[offset + 1] = y;
-        positions[offset + 2] = z;
-        positions[offset + 3] = x + effect.length;
-        positions[offset + 4] = y + 0.05;
-        positions[offset + 5] = z + 0.08;
-      }
+    const xRange = Math.max(effect.bounds.maxX - effect.bounds.minX, 0.0001);
+    const yRange = Math.max(effect.bounds.maxY - effect.bounds.minY, 0.0001);
+    if (effect.kind === "rain") {
+      effect.travelOffset = (effect.travelOffset + effect.speed * delta) % yRange;
+      effect.driftOffset = (effect.driftOffset + effect.drift * delta) % xRange;
+      effect.object.material.uniforms.uDriftOffset.value = effect.driftOffset;
+    } else {
+      effect.travelOffset = (effect.travelOffset + effect.speed * delta) % xRange;
     }
-    const attribute = effect.object.geometry.getAttribute("position");
-    attribute.needsUpdate = true;
+    effect.object.material.uniforms.uTravelOffset.value = effect.travelOffset;
   }
 
   private updateLightning(delta: number) {
@@ -1880,13 +2102,11 @@ export class ThreeEditor {
     if (this.weatherLightningBolt) {
       const material = this.weatherLightningBolt.material;
       material.opacity = Math.min(this.weatherLightningFlash / preset.lightning.intensity, 1);
-      material.needsUpdate = true;
     }
     if (this.weatherLightningSkyFlash) {
       const material = this.weatherLightningSkyFlash.material as THREE.SpriteMaterial;
       material.opacity =
         Math.min(this.weatherLightningFlash / preset.lightning.intensity, 1) * 0.42;
-      material.needsUpdate = true;
     }
   }
 
@@ -1995,11 +2215,8 @@ export class ThreeEditor {
     object: THREE.Object3D,
     lightConfig: ReturnType<typeof resolveLightCapability>,
   ) {
-    const emissiveIntensity = Math.max(
-      0.05,
-      lightConfig.brightnessRatio * lightConfig.maxIntensity,
-    );
-    const lightIntensity = emissiveIntensity * 8;
+    const { emissiveIntensity, lightIntensity } =
+      resolveLightRenderIntensity(lightConfig);
     const color = colorTemperatureToColor(lightConfig.colorTemperatureKelvin);
 
     object.traverse((node) => {

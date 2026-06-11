@@ -33,5 +33,6 @@ export function placeFloatingPanel({
   return {
     left: Math.round(clamp(centeredLeft, PADDING, maxLeft)),
     top: Math.round(clamp(top, PADDING, maxTop)),
+    placement: hasRoomAbove ? ("above" as const) : ("below" as const),
   };
 }

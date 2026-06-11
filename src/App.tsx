@@ -13,6 +13,12 @@ import {
   type HaFloatingPanelState,
 } from "./lib/ha-floating-panels";
 import { addHaBinding, getBoundEntityIds } from "./lib/ha-bindings";
+import { isFullscreen, toggleFullscreen } from "./lib/fullscreen";
+import {
+  loadEditorLocalConfig,
+  saveEditorLocalConfig,
+  type EditorLocalConfig,
+} from "./lib/editor-local-config";
 import { cn } from "./lib/utils";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
 import {
@@ -91,6 +97,7 @@ export default function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("perspective");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,9 +113,20 @@ export default function App() {
     Record<string, { x: number; y: number } | null>
   >({});
   const ha = useHomeAssistant();
-  const [environment, setEnvironment] =
-    useState<EnvironmentConfig>(defaultEnvironment);
-  const [weather, setWeather] = useState<WeatherConfig>(defaultWeather);
+  const localConfigRef = useRef<EditorLocalConfig | null>(loadEditorLocalConfig());
+  const [environment, setEnvironment] = useState<EnvironmentConfig>(
+    localConfigRef.current?.environment ?? defaultEnvironment,
+  );
+  const [weather, setWeather] = useState<WeatherConfig>(
+    localConfigRef.current?.weather ?? defaultWeather,
+  );
+
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullscreen(isFullscreen());
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    handleFullscreenChange();
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
 
   const refreshTree = useCallback(() => {
     const root = editor?.getRoot();
@@ -219,6 +237,31 @@ export default function App() {
   }, [editor, ha.states, modelVersion]);
 
   useEffect(() => {
+    editor?.setHaPanelMarkers(
+      floatingPanels.map((panel) => ({
+        id: panel.id,
+        objectIds: panel.objectIds,
+      })),
+    );
+  }, [editor, floatingPanels]);
+
+  useEffect(() => {
+    return () => editor?.setHaPanelMarkers([]);
+  }, [editor]);
+
+  useEffect(() => {
+    const nextConfig =
+      editor?.createLocalConfig(environment, weather) ?? {
+        version: 1,
+        environment,
+        weather,
+        objects: localConfigRef.current?.objects ?? {},
+      };
+    localConfigRef.current = nextConfig;
+    saveEditorLocalConfig(nextConfig);
+  }, [editor, environment, modelVersion, weather]);
+
+  useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!historyState.isDirty) {
         return;
@@ -293,6 +336,7 @@ export default function App() {
     setIsLoading(true);
     try {
       const root = await editor.loadModel(file);
+      editor.applyLocalConfig(localConfigRef.current);
       const nextTree = buildModelTree(root);
       setTree(nextTree);
       editor.selectObject(root.uuid);
@@ -319,6 +363,7 @@ export default function App() {
     setIsLoading(true);
     try {
       const root = await editor.loadModelFromUrl("/sample/smart-home.glb", "全屋智能家居模型");
+      editor.applyLocalConfig(localConfigRef.current);
       setTree(buildModelTree(root));
       editor.selectObject(root.uuid);
     } catch (sampleError) {
@@ -423,9 +468,12 @@ export default function App() {
         haStatus={ha.status}
         haStatusMessage={ha.statusMessage}
         weather={weather}
+        fullscreen={fullscreen}
         onUploadClick={handleUploadClick}
         onExport={handleExport}
         onTogglePreview={() => setPreviewMode((value) => !value)}
+        onToggleFullscreen={() => void toggleFullscreen()}
+        onRetryHaConnection={ha.retryConnection}
         onUndo={() => {
           if (editor?.undo()) {
             refreshTree();

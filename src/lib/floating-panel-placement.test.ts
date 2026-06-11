@@ -9,7 +9,7 @@ describe("floating-panel-placement", () => {
         panel: { width: 300, height: 240 },
         viewport: { width: 1000, height: 700 },
       }),
-    ).toEqual({ left: 350, top: 104 });
+    ).toEqual({ left: 350, top: 104, placement: "above" });
   });
 
   it("flips below the anchor when there is not enough room above", () => {
@@ -19,7 +19,7 @@ describe("floating-panel-placement", () => {
         panel: { width: 300, height: 240 },
         viewport: { width: 1000, height: 700 },
       }),
-    ).toEqual({ left: 12, top: 96 });
+    ).toEqual({ left: 12, top: 96, placement: "below" });
   });
 
   it("clamps oversized placements to viewport padding", () => {
@@ -29,6 +29,22 @@ describe("floating-panel-placement", () => {
         panel: { width: 900, height: 680 },
         viewport: { width: 800, height: 600 },
       }),
-    ).toEqual({ left: 12, top: 12 });
+    ).toEqual({ left: 12, top: 12, placement: "below" });
+  });
+
+  it("keeps the nearest panel edge at a stable gap from the model anchor", () => {
+    const above = placeFloatingPanel({
+      anchor: { x: 500, y: 500 },
+      panel: { width: 280, height: 300 },
+      viewport: { width: 1000, height: 800 },
+    });
+    const below = placeFloatingPanel({
+      anchor: { x: 500, y: 40 },
+      panel: { width: 280, height: 300 },
+      viewport: { width: 1000, height: 800 },
+    });
+
+    expect(above.top + 300).toBe(444);
+    expect(below.top).toBe(96);
   });
 });

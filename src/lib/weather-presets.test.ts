@@ -51,6 +51,11 @@ describe("weather presets", () => {
     expect(heavy.rain.speed).toBeGreaterThan(light.rain.speed);
   });
 
+  it("reduces medium and heavy rain base density by a quarter", () => {
+    expect(getWeatherPreset("rain-medium").rain.count).toBe(938);
+    expect(getWeatherPreset("rain-heavy").rain.count).toBe(1800);
+  });
+
   it("keeps weather particle counts suitable for whole-home model editing", () => {
     expect(getWeatherPreset("rain-heavy").rain.count).toBeLessThanOrEqual(2600);
     expect(getWeatherPreset("lightning").rain.count).toBeLessThanOrEqual(2600);

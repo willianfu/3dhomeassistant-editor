@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveLightRenderIntensity,
   defaultLightCapabilityConfig,
   resolveLightCapability,
+  resolveHaLightControlCapabilities,
 } from "./light";
 import type { HaEntityState } from "../../types/ha";
 
@@ -12,6 +14,10 @@ const states: Record<string, HaEntityState> = {
     attributes: {
       brightness: 128,
       color_temp_kelvin: 3200,
+      min_color_temp_kelvin: 2200,
+      max_color_temp_kelvin: 6500,
+      effect: "reading",
+      effect_list: ["reading", "relax"],
       friendly_name: "Kitchen light",
     },
   },
@@ -59,6 +65,20 @@ describe("light capability", () => {
       maxIntensity: 8,
       lightRange: 14,
     });
+  });
+
+  it("uses HA brightness as a 0-255 value and amplifies the real light source by 10x", () => {
+    const resolved = resolveLightCapability({
+      config: defaultLightCapabilityConfig(),
+      entityIds: ["light.kitchen"],
+      states,
+    });
+
+    const intensity = resolveLightRenderIntensity(resolved);
+
+    expect(resolved.brightnessRatio).toBeCloseTo(128 / 255);
+    expect(intensity.emissiveIntensity).toBeCloseTo((128 / 255) * 8);
+    expect(intensity.lightIntensity).toBeCloseTo((128 / 255) * 8 * 10);
   });
 
   it("allows switch, brightness, and color temperature mappings to override the light entity", () => {
@@ -140,6 +160,22 @@ describe("light capability", () => {
     expect(resolved).toMatchObject({
       emissionMode: "bottom",
       lightRange: 22,
+    });
+  });
+
+  it("derives Home Assistant light control capabilities from entity attributes", () => {
+    const capabilities = resolveHaLightControlCapabilities(states["light.kitchen"]);
+
+    expect(capabilities).toEqual({
+      brightnessPercent: 50,
+      colorTemperatureKelvin: 3200,
+      minColorTemperatureKelvin: 2200,
+      maxColorTemperatureKelvin: 6500,
+      effect: "reading",
+      effects: ["reading", "relax"],
+      supportsBrightness: true,
+      supportsColorTemperature: true,
+      supportsEffect: true,
     });
   });
 });

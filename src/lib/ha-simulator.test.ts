@@ -74,4 +74,41 @@ describe("ha-simulator", () => {
 
     expect(next["input_number.light_kelvin"].state).toBe("4600");
   });
+
+  it("updates climate target temperature and mode locally", () => {
+    const next = applySimulatedServiceCall(
+      {
+        "climate.living_room": {
+          entity_id: "climate.living_room",
+          state: "cool",
+          attributes: { temperature: 24, fan_mode: "auto" },
+        },
+      },
+      "climate.living_room",
+      "set_temperature",
+      { temperature: 25.5, hvac_mode: "heat" },
+    );
+
+    expect(next["climate.living_room"]).toMatchObject({
+      state: "heat",
+      attributes: { temperature: 25.5 },
+    });
+  });
+
+  it("updates climate fan mode locally", () => {
+    const next = applySimulatedServiceCall(
+      {
+        "climate.living_room": {
+          entity_id: "climate.living_room",
+          state: "cool",
+          attributes: { fan_mode: "auto" },
+        },
+      },
+      "climate.living_room",
+      "set_fan_mode",
+      { fan_mode: "high" },
+    );
+
+    expect(next["climate.living_room"].attributes.fan_mode).toBe("high");
+  });
 });
