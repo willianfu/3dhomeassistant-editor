@@ -3,7 +3,9 @@ import { useState, type ReactNode } from "react";
 import { removeHaBinding } from "../../lib/ha-bindings";
 import { defaultLightCapabilityConfig } from "../../lib/ha-capabilities/light";
 import { getEntityDomain } from "../../lib/ha-client";
+import type { HaRuntimeConfig } from "../../lib/ha-config";
 import { getSolarEnvironmentPreset } from "../../lib/environment-lighting";
+import { cn } from "../../lib/utils";
 import type {
   EnvironmentConfig,
   ObjectMetadata,
@@ -12,6 +14,7 @@ import type {
 } from "../../types/editor";
 import type {
   HaBinding,
+  HaConnectionStatus,
   HaEntityState,
   HaLightCapabilityConfig,
   HaManualDeviceType,
@@ -49,11 +52,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 type RightInspectorProps = {
   environment: EnvironmentConfig;
+  haConfig: HaRuntimeConfig;
+  haStatus: HaConnectionStatus;
+  haStatusMessage: string;
   metadata: ObjectMetadata | null;
   selectionTransform: SelectionTransformInfo | null;
   selectionBindings: HaBinding[];
   selectedCount: number;
   onEnvironmentChange: (config: EnvironmentConfig) => void;
+  onHaConfigChange: (config: HaRuntimeConfig) => void;
+  onRetryHaConnection: () => void;
   onPositionChange: (position: Vector3Values) => void;
   onScaleChange: (scale: Vector3Values) => void;
   onSizeChange: (size: Vector3Values) => void;
@@ -269,6 +277,83 @@ function DirectionSliders({
         }
         onChange={(z) => onChange({ ...value, z })}
       />
+    </div>
+  );
+}
+
+function haStatusLabel(status: HaConnectionStatus) {
+  if (status === "connected") {
+    return "已连接";
+  }
+  if (status === "connecting") {
+    return "连接中";
+  }
+  if (status === "not_configured") {
+    return "未配置";
+  }
+  return "未连接";
+}
+
+function HaGlobalConfigPanel({
+  config,
+  status,
+  statusMessage,
+  onChange,
+  onRetry,
+}: {
+  config: HaRuntimeConfig;
+  status: HaConnectionStatus;
+  statusMessage: string;
+  onChange: (config: HaRuntimeConfig) => void;
+  onRetry: () => void;
+}) {
+  const connected = status === "connected";
+  const update = (patch: Partial<HaRuntimeConfig>) => onChange({ ...config, ...patch });
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2 text-xs">
+          <span
+            className={cn(
+              "size-2 rounded-full shadow-[0_0_10px_currentColor]",
+              connected
+                ? "bg-emerald-400 text-emerald-400"
+                : status === "connecting"
+                  ? "bg-yellow-400 text-yellow-400"
+                  : "bg-destructive text-destructive",
+            )}
+          />
+          <span className="truncate text-muted-foreground" title={statusMessage || status}>
+            {haStatusLabel(status)}
+          </span>
+        </div>
+        <Button size="sm" variant="secondary" onClick={onRetry}>
+          连接
+        </Button>
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="ha-api-url">HA 地址</Label>
+        <Input
+          id="ha-api-url"
+          value={config.apiUrl}
+          placeholder="http://homeassistant.local:8123"
+          onChange={(event) => update({ apiUrl: event.target.value })}
+        />
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="ha-token">长期访问令牌</Label>
+        <Input
+          id="ha-token"
+          type="password"
+          value={config.token}
+          placeholder="Long-Lived Access Token"
+          onChange={(event) => update({ token: event.target.value })}
+        />
+      </div>
+      <div className="text-[10px] leading-4 text-muted-foreground">
+        配置会保存到浏览器本地存储，刷新后自动恢复并连接。
+      </div>
     </div>
   );
 }
@@ -662,11 +747,16 @@ function LightCapabilityPanel({
 
 export function RightInspector({
   environment,
+  haConfig,
+  haStatus,
+  haStatusMessage,
   metadata,
   selectionTransform,
   selectionBindings,
   selectedCount,
   onEnvironmentChange,
+  onHaConfigChange,
+  onRetryHaConnection,
   onPositionChange,
   onScaleChange,
   onSizeChange,
@@ -696,7 +786,21 @@ export function RightInspector({
         </TabsList>
         <TabsContent value="environment" className="h-[calc(100%-44px)]">
           <ScrollArea className="h-full pr-3">
-            <div className="grid gap-4">
+            <div className="grid gap-3">
+              <Accordion type="multiple" className="grid gap-3">
+                <AccordionItem value="ha-config" className="rounded-md border border-border bg-card px-3">
+                  <AccordionTrigger>Home Assistant</AccordionTrigger>
+                  <AccordionContent className="grid gap-3">
+                    <HaGlobalConfigPanel
+                      config={haConfig}
+                      status={haStatus}
+                      statusMessage={haStatusMessage}
+                      onChange={onHaConfigChange}
+                      onRetry={onRetryHaConnection}
+                    />
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
               <Section title="日照时间轴" description="24 档环境光预设，按上北下南左西右东计算太阳方向。">
                 <SliderField
                   label="时间"
@@ -716,69 +820,77 @@ export function RightInspector({
                   <span>19 夜间</span>
                 </div>
               </Section>
-              <Section title="环境光照">
-                <SliderField
-                  label="环境光强度"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={environment.ambientIntensity}
-                  onChange={(ambientIntensity) => updateEnvironment({ ambientIntensity })}
-                />
-                <SliderField
-                  label="主光强度"
-                  min={0}
-                  max={5}
-                  step={0.05}
-                  value={environment.directionalIntensity}
-                  onChange={(directionalIntensity) =>
-                    updateEnvironment({ directionalIntensity })
-                  }
-                />
-                <SliderField
-                  label="环境色温"
-                  min={1800}
-                  max={7500}
-                  step={50}
-                  suffix="K"
-                  value={environment.colorTemperatureKelvin}
-                  onChange={(colorTemperatureKelvin) =>
-                    updateEnvironment({ colorTemperatureKelvin })
-                  }
-                />
-                <SliderField
-                  label="曝光"
-                  min={0.2}
-                  max={2.5}
-                  step={0.05}
-                  value={environment.exposure}
-                  onChange={(exposure) => updateEnvironment({ exposure })}
-                />
-                <SliderField
-                  label="墙体透明度"
-                  min={0.08}
-                  max={1}
-                  step={0.02}
-                  value={environment.wallOpacity}
-                  onChange={(wallOpacity) => updateEnvironment({ wallOpacity })}
-                />
-              </Section>
-              <Section title="太阳方向">
-                <DirectionSliders
-                  value={environment.directionalPosition}
-                  onChange={(directionalPosition) =>
-                    updateEnvironment({ directionalPosition })
-                  }
-                />
-                <Separator />
-                <div className="flex items-center justify-between gap-3">
-                  <Label>显示网格</Label>
-                  <Switch
-                    checked={environment.gridVisible}
-                    onCheckedChange={(gridVisible) => updateEnvironment({ gridVisible })}
-                  />
-                </div>
-              </Section>
+              <Accordion type="multiple" className="grid gap-3">
+                <AccordionItem value="environment-light" className="rounded-md border border-border bg-card px-3">
+                  <AccordionTrigger>环境光照</AccordionTrigger>
+                  <AccordionContent className="grid gap-3">
+                    <SliderField
+                      label="环境光强度"
+                      min={0}
+                      max={3}
+                      step={0.05}
+                      value={environment.ambientIntensity}
+                      onChange={(ambientIntensity) => updateEnvironment({ ambientIntensity })}
+                    />
+                    <SliderField
+                      label="主光强度"
+                      min={0}
+                      max={5}
+                      step={0.05}
+                      value={environment.directionalIntensity}
+                      onChange={(directionalIntensity) =>
+                        updateEnvironment({ directionalIntensity })
+                      }
+                    />
+                    <SliderField
+                      label="环境色温"
+                      min={1800}
+                      max={7500}
+                      step={50}
+                      suffix="K"
+                      value={environment.colorTemperatureKelvin}
+                      onChange={(colorTemperatureKelvin) =>
+                        updateEnvironment({ colorTemperatureKelvin })
+                      }
+                    />
+                    <SliderField
+                      label="曝光"
+                      min={0.2}
+                      max={2.5}
+                      step={0.05}
+                      value={environment.exposure}
+                      onChange={(exposure) => updateEnvironment({ exposure })}
+                    />
+                    <SliderField
+                      label="墙体透明度"
+                      min={0.08}
+                      max={1}
+                      step={0.02}
+                      value={environment.wallOpacity}
+                      onChange={(wallOpacity) => updateEnvironment({ wallOpacity })}
+                    />
+                  </AccordionContent>
+                </AccordionItem>
+                <AccordionItem value="environment-sun" className="rounded-md border border-border bg-card px-3">
+                  <AccordionTrigger>太阳方向</AccordionTrigger>
+                  <AccordionContent className="grid gap-3">
+                    <DirectionSliders
+                      value={environment.directionalPosition}
+                      onChange={(directionalPosition) =>
+                        updateEnvironment({ directionalPosition })
+                      }
+                    />
+                    <Separator />
+                    <div className="flex items-center justify-between gap-3">
+                      <Label>显示网格</Label>
+                      <Switch
+                        checked={environment.gridVisible}
+                        onCheckedChange={(gridVisible) => updateEnvironment({ gridVisible })}
+                      />
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </div>
           </ScrollArea>
         </TabsContent>

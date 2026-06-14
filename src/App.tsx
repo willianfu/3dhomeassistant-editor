@@ -19,6 +19,7 @@ import {
   saveEditorLocalConfig,
   type EditorLocalConfig,
 } from "./lib/editor-local-config";
+import { defaultHaRuntimeConfig, type HaRuntimeConfig } from "./lib/ha-config";
 import { cn } from "./lib/utils";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
 import {
@@ -112,8 +113,11 @@ export default function App() {
   const [floatingAnchors, setFloatingAnchors] = useState<
     Record<string, { x: number; y: number } | null>
   >({});
-  const ha = useHomeAssistant();
   const localConfigRef = useRef<EditorLocalConfig | null>(loadEditorLocalConfig());
+  const [haConfig, setHaConfig] = useState<HaRuntimeConfig>(
+    localConfigRef.current?.ha ?? defaultHaRuntimeConfig(),
+  );
+  const ha = useHomeAssistant(haConfig);
   const [environment, setEnvironment] = useState<EnvironmentConfig>(
     localConfigRef.current?.environment ?? defaultEnvironment,
   );
@@ -251,15 +255,16 @@ export default function App() {
 
   useEffect(() => {
     const nextConfig =
-      editor?.createLocalConfig(environment, weather) ?? {
+      editor?.createLocalConfig(environment, weather, haConfig) ?? {
         version: 1,
         environment,
         weather,
+        ha: haConfig,
         objects: localConfigRef.current?.objects ?? {},
       };
     localConfigRef.current = nextConfig;
     saveEditorLocalConfig(nextConfig);
-  }, [editor, environment, modelVersion, weather]);
+  }, [editor, environment, haConfig, modelVersion, weather]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -539,11 +544,16 @@ export default function App() {
         >
           <RightInspector
             environment={environment}
+            haConfig={haConfig}
+            haStatus={ha.status}
+            haStatusMessage={ha.statusMessage}
             metadata={metadata}
             selectionTransform={selectionTransform}
             selectionBindings={selectionBindings}
             selectedCount={selectedIds.length}
             onEnvironmentChange={handleEnvironmentChange}
+            onHaConfigChange={setHaConfig}
+            onRetryHaConnection={ha.retryConnection}
             onPositionChange={handlePositionChange}
             onScaleChange={handleScaleChange}
             onSizeChange={handleSizeChange}

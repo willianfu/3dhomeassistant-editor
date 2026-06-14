@@ -43,6 +43,7 @@ import {
   createEditorLocalConfig,
   type EditorLocalConfig,
 } from "./editor-local-config";
+import type { HaRuntimeConfig } from "./ha-config";
 import { FpsMeter } from "./fps-meter";
 import {
   resolveLightCapability,
@@ -653,11 +654,15 @@ export class ThreeEditor {
     return this.history.getState();
   }
 
-  createLocalConfig(environment: EnvironmentConfig, weather: WeatherConfig) {
+  createLocalConfig(
+    environment: EnvironmentConfig,
+    weather: WeatherConfig,
+    ha: HaRuntimeConfig,
+  ) {
     if (!this.modelRoot) {
       return null;
     }
-    return createEditorLocalConfig(this.modelRoot, environment, weather);
+    return createEditorLocalConfig(this.modelRoot, environment, weather, ha);
   }
 
   applyLocalConfig(config: EditorLocalConfig | null) {

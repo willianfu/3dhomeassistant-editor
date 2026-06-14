@@ -3,9 +3,18 @@ export type HaRuntimeConfig = {
   token: string;
 };
 
-export function getHaRuntimeConfig(): HaRuntimeConfig {
+export function defaultHaRuntimeConfig(): HaRuntimeConfig {
   return {
-    apiUrl: import.meta.env.VITE_HA_API || import.meta.env.HA_API || "",
-    token: import.meta.env.VITE_HA_KEY || import.meta.env.HA_KEY || "",
+    apiUrl: "",
+    token: "",
+  };
+}
+
+export function normalizeHaRuntimeConfig(
+  config: Partial<HaRuntimeConfig> | null | undefined,
+): HaRuntimeConfig {
+  return {
+    apiUrl: String(config?.apiUrl ?? "").trim(),
+    token: String(config?.token ?? "").trim(),
   };
 }

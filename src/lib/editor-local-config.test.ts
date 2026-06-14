@@ -44,11 +44,15 @@ describe("editor local config", () => {
       fixedColorTemperatureKelvin: 3000,
     });
 
-    const config = createEditorLocalConfig(root, defaultEnvironment, {
-      mode: "rain-medium",
-    });
+    const config = createEditorLocalConfig(
+      root,
+      defaultEnvironment,
+      { mode: "rain-medium" },
+      { apiUrl: "http://ha.local:8123", token: "token-1" },
+    );
 
     expect(config.weather.mode).toBe("rain-medium");
+    expect(config.ha).toEqual({ apiUrl: "http://ha.local:8123", token: "token-1" });
     expect(config.objects["home/lamp"]).toMatchObject({
       deviceType: "light",
       bindings: [{ type: "entity", entityId: "light.kitchen" }],
@@ -60,7 +64,12 @@ describe("editor local config", () => {
     const source = createModel();
     setObjectBindings(source.lamp, [{ type: "entity", entityId: "light.kitchen" }]);
     setManualDeviceType(source.lamp, "light");
-    const config = createEditorLocalConfig(source.root, defaultEnvironment, defaultWeather);
+    const config = createEditorLocalConfig(
+      source.root,
+      defaultEnvironment,
+      defaultWeather,
+      { apiUrl: "", token: "" },
+    );
     const target = createModel();
 
     applyEditorLocalConfig(target.root, config);
@@ -78,14 +87,37 @@ describe("editor local config", () => {
       setItem: (key: string, value: string) => storage.set(key, value),
     };
     const { root } = createModel();
-    const config = createEditorLocalConfig(root, defaultEnvironment, {
-      mode: "cloudy",
-    });
+    const config = createEditorLocalConfig(
+      root,
+      defaultEnvironment,
+      { mode: "cloudy" },
+      { apiUrl: "http://ha.local:8123", token: "secret" },
+    );
 
     saveEditorLocalConfig(config, adapter);
 
     expect(loadEditorLocalConfig(adapter)?.weather.mode).toBe("cloudy");
+    expect(loadEditorLocalConfig(adapter)?.ha.apiUrl).toBe("http://ha.local:8123");
     expect(JSON.parse([...storage.values()][0]).version).toBe(1);
     expect(getLightCapabilityConfig(root)).toBeNull();
+  });
+
+  it("fills missing HA config when loading legacy config", () => {
+    const storage = new Map<string, string>();
+    storage.set(
+      "3dhomeassistant.editor.config",
+      JSON.stringify({
+        version: 1,
+        environment: defaultEnvironment,
+        weather: defaultWeather,
+        objects: {},
+      }),
+    );
+    const adapter = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    };
+
+    expect(loadEditorLocalConfig(adapter)?.ha).toEqual({ apiUrl: "", token: "" });
   });
 });

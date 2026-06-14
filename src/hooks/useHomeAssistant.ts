@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HomeAssistantWsClient, getEntityDomain } from "../lib/ha-client";
-import { getHaRuntimeConfig } from "../lib/ha-config";
+import { normalizeHaRuntimeConfig, type HaRuntimeConfig } from "../lib/ha-config";
 import { applySimulatedServiceCall } from "../lib/ha-simulator";
 import type { HaConnectionStatus, HaDevice, HaEntityState } from "../types/ha";
 
-export function useHomeAssistant() {
-  const config = useMemo(() => getHaRuntimeConfig(), []);
+export function useHomeAssistant(config: HaRuntimeConfig) {
+  const normalizedConfig = normalizeHaRuntimeConfig(config);
   const clientRef = useRef<HomeAssistantWsClient | null>(null);
   const [status, setStatus] = useState<HaConnectionStatus>("not_configured");
   const [statusMessage, setStatusMessage] = useState("");
@@ -14,15 +14,20 @@ export function useHomeAssistant() {
   const [deviceEntities, setDeviceEntities] = useState<Record<string, string[]>>({});
 
   const connect = useCallback(() => {
-    if (!config.apiUrl || !config.token) {
+    clientRef.current?.close();
+    clientRef.current = null;
+
+    if (!normalizedConfig.apiUrl || !normalizedConfig.token) {
       setStatus("not_configured");
       setStatusMessage("");
+      setDevices([]);
+      setDeviceEntities({});
       return;
     }
-    clientRef.current?.close();
+
     const client = new HomeAssistantWsClient({
-      url: config.apiUrl,
-      token: config.token,
+      url: normalizedConfig.apiUrl,
+      token: normalizedConfig.token,
       onStatus: (nextStatus, message) => {
         setStatus(nextStatus as HaConnectionStatus);
         setStatusMessage(message ?? "");
@@ -33,7 +38,7 @@ export function useHomeAssistant() {
     });
     clientRef.current = client;
     client.connect();
-  }, [config.apiUrl, config.token]);
+  }, [normalizedConfig.apiUrl, normalizedConfig.token]);
 
   useEffect(() => {
     connect();
@@ -103,7 +108,7 @@ export function useHomeAssistant() {
   );
 
   return {
-    config,
+    config: normalizedConfig,
     status,
     statusMessage,
     states,

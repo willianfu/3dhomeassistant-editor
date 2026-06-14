@@ -5,6 +5,8 @@ import type {
   HaLightCapabilityConfig,
   HaManualDeviceType,
 } from "../types/ha";
+import type { HaRuntimeConfig } from "./ha-config";
+import { defaultHaRuntimeConfig } from "./ha-config";
 import type { WeatherConfig } from "./weather-presets";
 import {
   getLightCapabilityConfig,
@@ -33,6 +35,7 @@ export type EditorLocalConfig = {
   version: 1;
   environment: EnvironmentConfig;
   weather: WeatherConfig;
+  ha: HaRuntimeConfig;
   objects: Record<string, EditorObjectLocalConfig>;
 };
 
@@ -48,6 +51,7 @@ export function createEditorLocalConfig(
   root: THREE.Object3D,
   environment: EnvironmentConfig,
   weather: WeatherConfig,
+  ha: HaRuntimeConfig,
 ): EditorLocalConfig {
   const objects: Record<string, EditorObjectLocalConfig> = {};
   root.traverse((object) => {
@@ -69,6 +73,7 @@ export function createEditorLocalConfig(
     version: 1,
     environment,
     weather,
+    ha,
     objects,
   };
 }
@@ -110,7 +115,13 @@ export function loadEditorLocalConfig(
       return null;
     }
     const parsed = JSON.parse(raw) as EditorLocalConfig;
-    return parsed.version === 1 ? parsed : null;
+    if (parsed.version !== 1) {
+      return null;
+    }
+    return {
+      ...parsed,
+      ha: parsed.ha ?? defaultHaRuntimeConfig(),
+    };
   } catch {
     return null;
   }
