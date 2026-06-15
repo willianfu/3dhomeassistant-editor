@@ -1,14 +1,21 @@
-import { Cuboid, Folder, GripVertical, Upload } from "lucide-react";
-import type { DragEvent } from "react";
+import { Cuboid, Folder, Search, Upload } from "lucide-react";
+import type { DragEvent, KeyboardEvent } from "react";
 import { useMemo, useRef, useState } from "react";
+import type { ModelLibraryItem } from "../../lib/model-library";
 import { flattenModelTree } from "../../lib/model-tree";
 import { cn } from "../../lib/utils";
 import { getVirtualRange } from "../../lib/virtual-list";
 import type { ModelTreeNode } from "../../types/editor";
-import type { ModelLibraryItem } from "../../lib/model-library";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "../ui/accordion";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { Card, CardContent } from "../ui/card";
+import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
@@ -27,6 +34,22 @@ type PartsTreeProps = {
   onBeginModelDrag: (event: DragEvent<HTMLElement>, item: ModelLibraryItem) => void;
   defaultTab?: "parts" | "library";
 };
+
+type ModelLibraryGroup = {
+  category: string;
+  items: ModelLibraryItem[];
+};
+
+function groupModelLibraryItems(items: ModelLibraryItem[]): ModelLibraryGroup[] {
+  const groups = new Map<string, ModelLibraryItem[]>();
+  for (const item of items) {
+    groups.set(item.category, [...(groups.get(item.category) ?? []), item]);
+  }
+  return [...groups.entries()].map(([category, groupItems]) => ({
+    category,
+    items: groupItems,
+  }));
+}
 
 function TreeRow({
   node,
@@ -70,37 +93,140 @@ function ModelLibraryTile({
   onDragStart: (event: DragEvent<HTMLElement>, item: ModelLibraryItem) => void;
 }) {
   return (
-    <Card
-      className="group overflow-hidden"
+    <button
+      type="button"
       draggable
+      aria-label={`添加 ${item.name}`}
+      onClick={() => onAdd(item)}
       onDragStart={(event) => onDragStart(event, item)}
+      className="group flex min-w-0 flex-col overflow-hidden rounded-md border border-border bg-card text-left text-card-foreground transition-colors hover:border-primary/55 hover:bg-secondary/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      <div className="aspect-[4/3] border-b border-border bg-secondary/35">
+      <span className="aspect-square w-full border-b border-border bg-secondary/35">
         <img
           src={item.thumbnailUrl}
           alt={item.name}
           className="h-full w-full object-cover"
           draggable={false}
         />
-      </div>
-      <CardHeader className="gap-2 p-3">
-        <CardTitle className="truncate text-sm">{item.name}</CardTitle>
-        <CardDescription className="flex items-center gap-2">
-          <Badge variant="secondary">{item.category}</Badge>
-          <Badge variant="outline">{item.format.toUpperCase()}</Badge>
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex items-center justify-between gap-2 px-3 pb-3 pt-0">
-        <Button size="sm" variant="secondary" onClick={() => onAdd(item)}>
-          <Cuboid data-icon="inline-start" />
-          添加
+      </span>
+      <span className="flex min-h-[42px] w-full flex-col justify-center gap-1 px-1.5 py-1">
+        <span className="truncate text-[11px] font-medium leading-4">{item.name}</span>
+        <span className="text-[10px] uppercase leading-none text-muted-foreground">
+          {item.format}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function ModelLibraryPanel({
+  items,
+  onAddLocalModelClick,
+  onAddLibraryModel,
+  onBeginModelDrag,
+}: {
+  items: ModelLibraryItem[];
+  onAddLocalModelClick: () => void;
+  onAddLibraryModel: (item: ModelLibraryItem) => void;
+  onBeginModelDrag: (event: DragEvent<HTMLElement>, item: ModelLibraryItem) => void;
+}) {
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredItems = useMemo(() => {
+    if (!normalizedQuery) {
+      return items;
+    }
+    return items.filter((item) => item.name.toLowerCase().includes(normalizedQuery));
+  }, [items, normalizedQuery]);
+  const groups = useMemo(() => groupModelLibraryItems(filteredItems), [filteredItems]);
+  const openCategories = useMemo(
+    () => groups.map((group) => group.category),
+    [groups],
+  );
+
+  const commitSearch = () => {
+    setSearchQuery(searchDraft);
+  };
+
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitSearch();
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
+      <div className="flex items-center gap-1.5">
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          aria-label="添加本地模型"
+          onClick={onAddLocalModelClick}
+        >
+          <Upload data-icon="inline-start" />
         </Button>
-        <div className="flex items-center gap-1 text-xs text-muted-foreground">
-          <GripVertical />
-          拖拽
-        </div>
-      </CardContent>
-    </Card>
+        <Input
+          value={searchDraft}
+          onChange={(event) => setSearchDraft(event.target.value)}
+          onKeyDown={handleSearchKeyDown}
+          placeholder="搜索模型名称"
+          className="min-w-0 flex-1 text-xs"
+        />
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          aria-label="搜索模型"
+          onClick={commitSearch}
+        >
+          <Search data-icon="inline-start" />
+        </Button>
+      </div>
+      <ScrollArea className="min-h-0 flex-1 pr-2">
+        {groups.length > 0 ? (
+          <Accordion
+            type="multiple"
+            defaultValue={openCategories}
+            className="flex flex-col gap-2"
+          >
+            {groups.map((group) => (
+              <AccordionItem
+                key={group.category}
+                value={group.category}
+                className="rounded-md border border-border px-2"
+              >
+                <AccordionTrigger className="py-2 text-xs hover:no-underline">
+                  <span className="truncate">
+                    {group.category} {group.items.length}
+                  </span>
+                </AccordionTrigger>
+                <AccordionContent className="pb-2">
+                  <div data-testid="model-library-grid" className="grid grid-cols-4 gap-1.5">
+                    {group.items.map((item) => (
+                      <ModelLibraryTile
+                        key={item.id}
+                        item={item}
+                        onAdd={onAddLibraryModel}
+                        onDragStart={onBeginModelDrag}
+                      />
+                    ))}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            ))}
+          </Accordion>
+        ) : (
+          <Card>
+            <CardContent className="p-3 text-center text-xs text-muted-foreground">
+              未找到匹配模型
+            </CardContent>
+          </Card>
+        )}
+      </ScrollArea>
+    </div>
   );
 }
 
@@ -200,24 +326,12 @@ export function PartsTree({
           )}
         </TabsContent>
         <TabsContent value="library" className="mt-0 h-[calc(100%-65px)]">
-          <div className="flex h-full min-h-0 flex-col gap-3 p-3">
-            <Button variant="secondary" className="w-full" onClick={onAddLocalModelClick}>
-              <Upload data-icon="inline-start" />
-              添加本地模型
-            </Button>
-            <ScrollArea className="min-h-0 flex-1 pr-2">
-              <div className="grid gap-3">
-                {modelLibraryItems.map((item) => (
-                  <ModelLibraryTile
-                    key={item.id}
-                    item={item}
-                    onAdd={onAddLibraryModel}
-                    onDragStart={onBeginModelDrag}
-                  />
-                ))}
-              </div>
-            </ScrollArea>
-          </div>
+          <ModelLibraryPanel
+            items={modelLibraryItems}
+            onAddLocalModelClick={onAddLocalModelClick}
+            onAddLibraryModel={onAddLibraryModel}
+            onBeginModelDrag={onBeginModelDrag}
+          />
         </TabsContent>
       </Tabs>
     </aside>
