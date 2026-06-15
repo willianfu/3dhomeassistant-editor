@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent } from "react";
 import { PartsTree } from "./components/editor/PartsTree";
 import { RightInspector } from "./components/editor/RightInspector";
 import { HaBindingDialog } from "./components/editor/HaBindingDialog";
@@ -22,6 +23,14 @@ import {
 import { defaultHaRuntimeConfig, type HaRuntimeConfig } from "./lib/ha-config";
 import { cn } from "./lib/utils";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
+import {
+  MODEL_LIBRARY_DRAG_TYPE,
+  isSupportedModelFile,
+  modelLibraryItems,
+  parseModelLibraryDragItem,
+  serializeModelLibraryDragItem,
+  type ModelLibraryItem,
+} from "./lib/model-library";
 import {
   buildModelTree,
   getObjectMetadata,
@@ -92,6 +101,7 @@ function isEditableTarget(target: EventTarget | null) {
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const libraryFileInputRef = useRef<HTMLInputElement | null>(null);
   const [editor, setEditor] = useState<ThreeEditor | null>(null);
   const [tree, setTree] = useState<ModelTreeNode | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -320,6 +330,10 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
+  const handleLibraryUploadClick = () => {
+    libraryFileInputRef.current?.click();
+  };
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -353,6 +367,71 @@ export default function App() {
       setIsLoading(false);
     }
   };
+
+  const handleLibraryFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !editor) {
+      return;
+    }
+    if (!isSupportedModelFile(file)) {
+      setError("仅支持上传 .glb、.gltf 或 .obj 模型文件。");
+      return;
+    }
+
+    setError(null);
+    setIsLoading(true);
+    try {
+      await editor.addModelFromFile(file);
+      refreshTree();
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "模型加载失败。");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAddLibraryModel = async (item: ModelLibraryItem) => {
+    if (!editor) {
+      return;
+    }
+    setError(null);
+    setIsLoading(true);
+    try {
+      await editor.addModelFromUrl(item.url, item.name);
+      refreshTree();
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "模型加载失败。");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleBeginModelDrag = (
+    event: DragEvent<HTMLElement>,
+    item: ModelLibraryItem,
+  ) => {
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData(
+      MODEL_LIBRARY_DRAG_TYPE,
+      serializeModelLibraryDragItem(item),
+    );
+    event.dataTransfer.setData("text/plain", item.name);
+  };
+
+  const handleViewportDrop = async (dataTransfer: DataTransfer) => {
+    const payload = dataTransfer.getData(MODEL_LIBRARY_DRAG_TYPE);
+    const item = payload ? parseModelLibraryDragItem(payload) : null;
+    if (!item) {
+      return;
+    }
+    await handleAddLibraryModel(item);
+  };
+
+  const canDropLibraryModel = (dataTransfer: DataTransfer) =>
+    Array.from(dataTransfer.types).includes(MODEL_LIBRARY_DRAG_TYPE);
 
   const handleLoadSample = async () => {
     if (!editor) {
@@ -504,6 +583,13 @@ export default function App() {
         className="hidden"
         onChange={handleFileChange}
       />
+      <input
+        ref={libraryFileInputRef}
+        type="file"
+        accept=".glb,.gltf,.obj,model/gltf-binary,model/gltf+json"
+        className="hidden"
+        onChange={handleLibraryFileChange}
+      />
       <div className="flex min-h-0 flex-1">
         <div
           aria-hidden={leftCollapsed || previewMode}
@@ -519,7 +605,11 @@ export default function App() {
             selectedIds={selectedIds}
             onSelect={handleSelect}
             onUploadClick={handleUploadClick}
+            onAddLocalModelClick={handleLibraryUploadClick}
             onLoadSample={handleLoadSample}
+            modelLibraryItems={modelLibraryItems}
+            onAddLibraryModel={handleAddLibraryModel}
+            onBeginModelDrag={handleBeginModelDrag}
           />
         </div>
         <Viewport
@@ -528,6 +618,8 @@ export default function App() {
           onModelChange={() => setModelVersion((version) => version + 1)}
           onHistoryChange={setHistoryState}
           onLoadProgress={() => undefined}
+          canDropModel={canDropLibraryModel}
+          onModelDrop={(dataTransfer) => void handleViewportDrop(dataTransfer)}
           isLoading={isLoading}
           error={error}
           viewMode={viewMode}

@@ -9,6 +9,8 @@ type ViewportProps = {
   onModelChange: () => void;
   onHistoryChange: (state: EditorHistoryState) => void;
   onLoadProgress: (progress: number) => void;
+  canDropModel: (dataTransfer: DataTransfer) => boolean;
+  onModelDrop: (dataTransfer: DataTransfer) => void;
   isLoading: boolean;
   error: string | null;
   viewMode: ViewMode;
@@ -21,6 +23,8 @@ export function Viewport({
   onModelChange,
   onHistoryChange,
   onLoadProgress,
+  canDropModel,
+  onModelDrop,
   isLoading,
   error,
   viewMode,
@@ -79,7 +83,22 @@ export function Viewport({
 
   return (
     <section className="relative min-w-0 flex-1 overflow-hidden bg-[#0b1017]">
-      <div ref={hostRef} className="h-full w-full" />
+      <div
+        ref={hostRef}
+        className="h-full w-full"
+        onDragOver={(event) => {
+          if (canDropModel(event.dataTransfer)) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+          }
+        }}
+        onDrop={(event) => {
+          if (canDropModel(event.dataTransfer)) {
+            event.preventDefault();
+            onModelDrop(event.dataTransfer);
+          }
+        }}
+      />
       {!previewMode ? (
         <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-border bg-panel/80 px-3 py-2 text-xs text-muted-foreground shadow-xl backdrop-blur">
           {viewMode === "perspective"

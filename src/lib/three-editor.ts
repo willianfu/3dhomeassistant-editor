@@ -3,6 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import type { EnvironmentConfig, Vector3Values, ViewMode } from "../types/editor";
@@ -185,6 +186,7 @@ export class ThreeEditor {
     defaultEnvironment.directionalIntensity,
   );
   private loader: GLTFLoader;
+  private objLoader = new OBJLoader();
   private dracoLoader: DRACOLoader;
   private history = new EditorHistory();
   private isApplyingHistory = false;
@@ -405,6 +407,23 @@ export class ThreeEditor {
     this.options.onModelChange?.();
     this.options.onLoadProgress?.(1);
     return root;
+  }
+
+  async addModelFromUrl(url: string, name = "model") {
+    const object = await this.loadObjectFromUrl(url, name);
+    return this.addModelObject(object, name);
+  }
+
+  async addModelFromFile(file: File) {
+    const url = URL.createObjectURL(file);
+    const name = file.name.replace(/\.(glb|gltf|obj)$/i, "");
+    try {
+      const object = await this.loadObjectFromUrl(url, name, file.name);
+      return this.addModelObject(object, name);
+    } finally {
+      URL.revokeObjectURL(url);
+      this.options.onLoadProgress?.(1);
+    }
   }
 
   selectObject(uuid: string | null) {
@@ -965,6 +984,78 @@ export class ThreeEditor {
   private clearHistory() {
     this.history.clear();
     this.options.onHistoryChange?.(this.history.getState());
+  }
+
+  private async loadObjectFromUrl(url: string, name: string, filename = url) {
+    if (/\.(obj)(?:$|\?)/i.test(filename)) {
+      const object = await this.objLoader.loadAsync(url, (event) => {
+        if (event.total > 0) {
+          this.options.onLoadProgress?.(event.loaded / event.total);
+        }
+      });
+      object.name = object.name || name;
+      this.options.onLoadProgress?.(1);
+      return object;
+    }
+
+    if (!/\.(glb|gltf)(?:$|\?)/i.test(filename)) {
+      throw new Error("仅支持加载 .glb、.gltf 或 .obj 模型文件。");
+    }
+
+    const gltf = await this.loader.loadAsync(url, (event) => {
+      if (event.total > 0) {
+        this.options.onLoadProgress?.(event.loaded / event.total);
+      }
+    });
+    const root = gltf.scene;
+    root.name = root.name || name;
+    this.options.onLoadProgress?.(1);
+    return root;
+  }
+
+  private ensureModelRoot() {
+    if (this.modelRoot) {
+      return this.modelRoot;
+    }
+    const root = new THREE.Group();
+    root.name = "模型场景";
+    ensureModelObjectIds(root);
+    this.modelRoot = root;
+    this.scene.add(root);
+    return root;
+  }
+
+  private addModelObject(object: THREE.Object3D, name: string) {
+    const root = this.ensureModelRoot();
+    object.name = object.name || name;
+    ensureModelObjectIds(object);
+    this.prepareModel(object);
+    root.add(object);
+    this.rebuildObjectMap();
+    this.frameObject(object);
+    this.setViewMode(this.viewMode);
+    this.rebuildWeatherEffects();
+    this.selectObject(object.uuid);
+    this.history.push({
+      label: "添加模型",
+      undo: () => {
+        object.parent?.remove(object);
+        this.rebuildObjectMap();
+        this.selectObject(null);
+        this.rebuildWeatherEffects();
+        this.options.onModelChange?.();
+      },
+      redo: () => {
+        root.add(object);
+        this.rebuildObjectMap();
+        this.selectObject(object.uuid);
+        this.rebuildWeatherEffects();
+        this.options.onModelChange?.();
+      },
+    });
+    this.options.onHistoryChange?.(this.history.getState());
+    this.options.onModelChange?.();
+    return object;
   }
 
   private prepareModel(root: THREE.Object3D) {
