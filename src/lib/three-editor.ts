@@ -6,6 +6,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
+import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import type {
   EnvironmentConfig,
   PreviewCameraMode,
@@ -1014,8 +1015,10 @@ export class ThreeEditor {
     }
     const exporter = new GLTFExporter();
     this.restoreWallTransparency();
+    const exportRoot = this.modelRoot.clone(true);
+    this.sanitizeModelGeometry(exportRoot);
     try {
-      const result = await exporter.parseAsync(this.modelRoot, { binary: true });
+      const result = await exporter.parseAsync(exportRoot, { binary: true });
       if (result instanceof ArrayBuffer) {
         return new Blob([result], { type: "model/gltf-binary" });
       }
@@ -1201,6 +1204,171 @@ export class ThreeEditor {
         mesh.userData.selectable = true;
       }
     });
+  }
+
+  private sanitizeModelGeometry(root: THREE.Object3D) {
+    const meshes: THREE.Mesh[] = [];
+    root.traverse((node) => {
+      if ((node as THREE.Mesh).isMesh) {
+        meshes.push(node as THREE.Mesh);
+      }
+    });
+    for (const mesh of meshes) {
+      const isRenderable = this.sanitizeMeshGeometry(mesh, { cloneGeometry: true });
+      if (!isRenderable) {
+        mesh.parent?.remove(mesh);
+      }
+    }
+  }
+
+  private sanitizeMeshGeometry(
+    mesh: THREE.Mesh,
+    options: { cloneGeometry: boolean },
+  ) {
+    let geometry = mesh.geometry;
+    if (!geometry || !geometry.attributes) {
+      return false;
+    }
+    if (options.cloneGeometry) {
+      geometry = geometry.clone();
+      mesh.geometry = geometry;
+    }
+    for (const [name, attribute] of Object.entries(geometry.attributes)) {
+      if (!(attribute instanceof THREE.BufferAttribute)) {
+        continue;
+      }
+      if (attribute.array instanceof Float32Array) {
+        this.sanitizeFloatAttribute(geometry, name, attribute);
+      }
+    }
+    const merged = mergeVertices(geometry, 1e-6);
+    if (merged !== geometry) {
+      mesh.geometry = merged;
+      geometry = merged;
+    }
+    const hasTriangles = this.removeDegenerateTriangles(geometry);
+    if (!hasTriangles) {
+      return false;
+    }
+    this.sanitizeGeometryGroups(geometry);
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return true;
+  }
+
+  private sanitizeFloatAttribute(
+    geometry: THREE.BufferGeometry,
+    name: string,
+    attribute: THREE.BufferAttribute,
+  ) {
+    const source = attribute.array as Float32Array;
+    let needsCleanup = false;
+    for (let index = 0; index < source.length; index += 1) {
+      const value = source[index];
+      if (!Number.isFinite(value) || Math.abs(value) > 1e20) {
+        needsCleanup = true;
+        break;
+      }
+    }
+    if (!needsCleanup) {
+      return;
+    }
+    const array = new Float32Array(source);
+    for (let index = 0; index < array.length; index += 1) {
+      const value = array[index];
+      if (!Number.isFinite(value) || Math.abs(value) > 1e20) {
+        array[index] = 0;
+      }
+    }
+    const cleaned = new THREE.BufferAttribute(
+      array,
+      attribute.itemSize,
+      attribute.normalized,
+    );
+    cleaned.name = attribute.name;
+    cleaned.usage = attribute.usage;
+    geometry.setAttribute(name, cleaned);
+  }
+
+  private removeDegenerateTriangles(geometry: THREE.BufferGeometry) {
+    const position = geometry.getAttribute("position");
+    if (!(position instanceof THREE.BufferAttribute) || position.itemSize < 3) {
+      return false;
+    }
+    const index = geometry.getIndex();
+    const indexArray = index
+      ? Array.from(index.array as ArrayLike<number>)
+      : Array.from({ length: position.count }, (_, value) => value);
+    if (indexArray.length < 3) {
+      return false;
+    }
+    const nextIndices: number[] = [];
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    const cross = new THREE.Vector3();
+    for (let offset = 0; offset + 2 < indexArray.length; offset += 3) {
+      const ia = indexArray[offset];
+      const ib = indexArray[offset + 1];
+      const ic = indexArray[offset + 2];
+      if (
+        ia < 0 ||
+        ib < 0 ||
+        ic < 0 ||
+        ia >= position.count ||
+        ib >= position.count ||
+        ic >= position.count
+      ) {
+        continue;
+      }
+      a.fromBufferAttribute(position, ia);
+      b.fromBufferAttribute(position, ib);
+      c.fromBufferAttribute(position, ic);
+      ab.subVectors(b, a);
+      ac.subVectors(c, a);
+      cross.crossVectors(ab, ac);
+      if (cross.lengthSq() <= 1e-16) {
+        continue;
+      }
+      nextIndices.push(ia, ib, ic);
+    }
+    if (nextIndices.length === indexArray.length) {
+      return true;
+    }
+    if (nextIndices.length < 3) {
+      geometry.setIndex([]);
+      return false;
+    }
+    geometry.setIndex(nextIndices);
+    return true;
+  }
+
+  private sanitizeGeometryGroups(geometry: THREE.BufferGeometry) {
+    if (geometry.groups.length === 0) {
+      return;
+    }
+    const drawCount = geometry.getIndex()?.count ?? geometry.getAttribute("position")?.count ?? 0;
+    let changed = false;
+    const groups = geometry.groups
+      .map((group) => {
+        const rawCount = Math.min(group.count, Math.max(0, drawCount - group.start));
+        const count = rawCount - (rawCount % 3);
+        changed ||= count !== group.count;
+        return {
+          ...group,
+          count,
+        };
+      })
+      .filter((group) => group.start >= 0 && group.count >= 3);
+    if (!changed && groups.length === geometry.groups.length) {
+      return;
+    }
+    geometry.clearGroups();
+    for (const group of groups) {
+      geometry.addGroup(group.start, group.count, group.materialIndex);
+    }
   }
 
   private ensureLightReactiveMaterial(
