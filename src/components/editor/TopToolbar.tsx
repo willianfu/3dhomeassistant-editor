@@ -7,6 +7,7 @@ import {
   Maximize2,
   Minimize2,
   CloudSun,
+  MapPin,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -28,8 +29,11 @@ import {
   type WeatherMode,
 } from "../../lib/weather-presets";
 import type { HaConnectionStatus } from "../../types/ha";
-import type { ViewMode } from "../../types/editor";
+import type { PreviewCameraMode, ViewMode } from "../../types/editor";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import {
   Tooltip,
@@ -42,6 +46,7 @@ type TopToolbarProps = {
   hasModel: boolean;
   isLoading: boolean;
   previewMode: boolean;
+  previewCameraMode: PreviewCameraMode;
   leftCollapsed: boolean;
   rightCollapsed: boolean;
   viewMode: ViewMode;
@@ -49,10 +54,12 @@ type TopToolbarProps = {
   haStatus: HaConnectionStatus;
   haStatusMessage: string;
   weather: WeatherConfig;
+  weatherStatus?: string | null;
   fullscreen: boolean;
   onUploadClick: () => void;
   onExport: () => void;
   onTogglePreview: () => void;
+  onPreviewCameraModeChange: (mode: PreviewCameraMode) => void;
   onToggleFullscreen: () => void;
   onRetryHaConnection: () => void;
   onUndo: () => void;
@@ -161,13 +168,18 @@ function getWeatherIcon(mode: WeatherMode) {
 
 function WeatherMenu({
   weather,
+  weatherStatus,
   onChange,
 }: {
   weather: WeatherConfig;
+  weatherStatus?: string | null;
   onChange: (weather: WeatherConfig) => void;
 }) {
   const current = WEATHER_OPTIONS.find((option) => option.mode === weather.mode) ?? WEATHER_OPTIONS[0];
   const CurrentIcon = getWeatherIcon(current.mode);
+  const openBaiduPicker = () => {
+    window.open("https://api.map.baidu.com/lbsapi/getpoint/", "_blank", "noopener,noreferrer");
+  };
 
   return (
     <Popover>
@@ -181,12 +193,64 @@ function WeatherMenu({
         </TooltipTrigger>
         <TooltipContent>天气模拟：{current.label}</TooltipContent>
       </Tooltip>
-      <PopoverContent align="end" className="w-[280px]">
-        <div className="mb-3">
+      <PopoverContent align="end" className="w-[300px]">
+        <div className="mb-2">
           <div className="text-sm font-medium text-foreground">天气模拟</div>
-          <div className="text-xs text-muted-foreground">选择后会实时作用到 3D 渲染器</div>
+          <div className="text-[10px] text-muted-foreground">实时天气或手动模拟</div>
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        <details className="mb-2 rounded-md border border-border bg-background/50 p-2">
+          <summary className="cursor-pointer text-xs font-medium text-foreground">
+            实时天气配置
+          </summary>
+          <div className="mt-2 grid gap-2">
+            <label className="flex items-center gap-2 text-xs">
+              <Checkbox
+                checked={weather.realtimeEnabled ?? true}
+                onCheckedChange={(checked) =>
+                  onChange({ ...weather, realtimeEnabled: checked === true })
+                }
+              />
+              <span>实时天气</span>
+            </label>
+            <div className="grid grid-cols-[52px_1fr] items-center gap-1.5">
+              <Label className="text-xs">Key</Label>
+              <Input
+                type="password"
+                value={weather.qweatherApiKey ?? ""}
+                placeholder="和风天气 API Key"
+                onChange={(event) =>
+                  onChange({ ...weather, qweatherApiKey: event.target.value })
+                }
+              />
+              <Label className="text-xs">位置</Label>
+              <div className="flex min-w-0 items-center gap-1">
+                <Input
+                  value={weather.qweatherLocation ?? ""}
+                  placeholder="115.86,28.68"
+                  className="min-w-0"
+                  onChange={(event) =>
+                    onChange({ ...weather, qweatherLocation: event.target.value })
+                  }
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon"
+                  aria-label="打开百度地图坐标拾取"
+                  onClick={openBaiduPicker}
+                >
+                  <MapPin data-icon="inline-start" />
+                </Button>
+              </div>
+            </div>
+          </div>
+          {weatherStatus ? (
+            <div className="mt-2 truncate text-[10px] text-muted-foreground" title={weatherStatus}>
+              {weatherStatus}
+            </div>
+          ) : null}
+        </details>
+        <div className="grid grid-cols-3 gap-1.5">
           {WEATHER_OPTIONS.map((option) => {
             const Icon = getWeatherIcon(option.mode);
             return (
@@ -194,16 +258,13 @@ function WeatherMenu({
                 key={option.mode}
                 type="button"
                 variant={weather.mode === option.mode ? "default" : "outline"}
-                className="h-auto justify-start px-2 py-2"
-                onClick={() => onChange({ mode: option.mode })}
+                className="h-8 justify-start px-1.5 text-xs"
+                onClick={() =>
+                  onChange({ ...weather, mode: option.mode, realtimeEnabled: false })
+                }
               >
                 <Icon data-icon="inline-start" />
-                <span className="grid min-w-0 text-left">
-                  <span className="truncate text-xs">{option.label}</span>
-                  <span className="truncate text-[10px] opacity-70">
-                    {option.description}
-                  </span>
-                </span>
+                <span className="truncate">{option.label}</span>
               </Button>
             );
           })}
@@ -217,6 +278,7 @@ export function TopToolbar({
   hasModel,
   isLoading,
   previewMode,
+  previewCameraMode,
   leftCollapsed,
   rightCollapsed,
   viewMode,
@@ -224,10 +286,12 @@ export function TopToolbar({
   haStatus,
   haStatusMessage,
   weather,
+  weatherStatus,
   fullscreen,
   onUploadClick,
   onExport,
   onTogglePreview,
+  onPreviewCameraModeChange,
   onToggleFullscreen,
   onRetryHaConnection,
   onUndo,
@@ -254,7 +318,7 @@ export function TopToolbar({
               3D 智能家居主控设计器
             </div>
             <div className="truncate text-xs text-muted-foreground">
-              {previewMode ? "预览模式" : "GLB / GLTF 模型编辑"}
+              {previewMode ? "预览模式" : "GLB / GLTF / OBJ 模型编辑"}
               {historyState.isDirty && !previewMode ? " · 未导出" : ""}
             </div>
           </div>
@@ -266,7 +330,11 @@ export function TopToolbar({
             message={haStatusMessage}
             onRetry={onRetryHaConnection}
           />
-          <WeatherMenu weather={weather} onChange={onWeatherChange} />
+          <WeatherMenu
+            weather={weather}
+            weatherStatus={weatherStatus}
+            onChange={onWeatherChange}
+          />
           <IconButton
             label={fullscreen ? "退出全屏" : "全屏显示"}
             onClick={onToggleFullscreen}
@@ -274,15 +342,33 @@ export function TopToolbar({
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </IconButton>
           {previewMode ? (
-            <Button
-              variant="default"
-              size="sm"
-              onClick={onTogglePreview}
-              disabled={!hasModel}
-            >
-              <EyeOff data-icon="inline-start" />
-              返回编辑
-            </Button>
+            <>
+              <div className="flex h-8 items-center rounded-md border border-border bg-background/60 p-0.5">
+                {([
+                  ["manual", "手动视角"],
+                  ["auto", "自动视角"],
+                ] as const).map(([mode, label]) => (
+                  <Button
+                    key={mode}
+                    variant={previewCameraMode === mode ? "default" : "ghost"}
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => onPreviewCameraModeChange(mode)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={onTogglePreview}
+                disabled={!hasModel}
+              >
+                <EyeOff data-icon="inline-start" />
+                返回编辑
+              </Button>
+            </>
           ) : (
             <>
               <div className="flex h-8 items-center rounded-md border border-border bg-background/60 p-0.5">

@@ -27,6 +27,7 @@ import {
 } from "../ui/accordion";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import {
   Card,
   CardContent,
@@ -65,6 +66,7 @@ type RightInspectorProps = {
   onPositionChange: (position: Vector3Values) => void;
   onScaleChange: (scale: Vector3Values) => void;
   onSizeChange: (size: Vector3Values) => void;
+  onCenterChange: (center: Vector3Values) => void;
   onUniformScale: (multiplier: number) => void;
   onOpenBindingDialog: () => void;
   onBindingsChange: (bindings: HaBinding[]) => void;
@@ -193,6 +195,53 @@ function InfoRow({ label, value }: { label: string; value: ReactNode }) {
       <span className="min-w-0 truncate text-right text-foreground" title={String(value)}>
         {value}
       </span>
+    </div>
+  );
+}
+
+function formatMeters(value: number) {
+  if (!Number.isFinite(value)) {
+    return "0 m";
+  }
+  const rounded = value.toFixed(3).replace(/\.?0+$/, "");
+  return `${rounded || "0"} m`;
+}
+
+function CompactDimensionRows({
+  size,
+  center,
+}: {
+  size: Vector3Values;
+  center?: Vector3Values;
+}) {
+  return (
+    <div className="grid gap-2 rounded-md border border-border bg-background/50 p-2">
+      <div className="grid grid-cols-3 gap-1.5">
+        <div className="min-w-0 rounded-sm bg-secondary/45 px-1.5 py-1 text-center">
+          <div className="text-[10px] leading-3 text-muted-foreground">长</div>
+          <div className="truncate text-[11px] leading-4" title={formatMeters(size.x)}>
+            {formatMeters(size.x)}
+          </div>
+        </div>
+        <div className="min-w-0 rounded-sm bg-secondary/45 px-1.5 py-1 text-center">
+          <div className="text-[10px] leading-3 text-muted-foreground">宽</div>
+          <div className="truncate text-[11px] leading-4" title={formatMeters(size.z)}>
+            {formatMeters(size.z)}
+          </div>
+        </div>
+        <div className="min-w-0 rounded-sm bg-secondary/45 px-1.5 py-1 text-center">
+          <div className="text-[10px] leading-3 text-muted-foreground">高</div>
+          <div className="truncate text-[11px] leading-4" title={formatMeters(size.y)}>
+            {formatMeters(size.y)}
+          </div>
+        </div>
+      </div>
+      {center ? (
+        <InfoRow
+          label="中心点"
+          value={`${formatMeters(center.x)}, ${formatMeters(center.y)}, ${formatMeters(center.z)}`}
+        />
+      ) : null}
     </div>
   );
 }
@@ -363,12 +412,14 @@ function SizeScalePanel({
   metadata,
   onScaleChange,
   onSizeChange,
+  onCenterChange,
   onUniformScale,
 }: {
   selectionTransform: SelectionTransformInfo | null;
   metadata: ObjectMetadata | null;
   onScaleChange: (scale: Vector3Values) => void;
   onSizeChange: (size: Vector3Values) => void;
+  onCenterChange: (center: Vector3Values) => void;
   onUniformScale: (multiplier: number) => void;
 }) {
   const [uniformScale, setUniformScale] = useState(1);
@@ -383,9 +434,22 @@ function SizeScalePanel({
         labels={["长", "宽", "高"]}
         min={0.001}
         step={0.05}
-        value={selectionTransform.size}
-        onChange={onSizeChange}
+        value={{
+          x: selectionTransform.size.x,
+          y: selectionTransform.size.z,
+          z: selectionTransform.size.y,
+        }}
+        onChange={(size) => onSizeChange({ x: size.x, y: size.z, z: size.y })}
       />
+      <div className="grid gap-2">
+        <Label>中心点</Label>
+        <VectorFields
+          labels={["X", "高度Y", "Z"]}
+          step={0.05}
+          value={selectionTransform.center}
+          onChange={onCenterChange}
+        />
+      </div>
       {metadata ? (
         <div className="grid gap-2">
           <Label>对象缩放</Label>
@@ -760,6 +824,7 @@ export function RightInspector({
   onPositionChange,
   onScaleChange,
   onSizeChange,
+  onCenterChange,
   onUniformScale,
   onOpenBindingDialog,
   onBindingsChange,
@@ -802,6 +867,18 @@ export function RightInspector({
                 </AccordionItem>
               </Accordion>
               <Section title="日照时间轴" description="24 档环境光预设，按上北下南左西右东计算太阳方向。">
+                <label className="flex items-center gap-2 text-xs">
+                  <Checkbox
+                    checked={environment.realtimeTimeEnabled ?? true}
+                    onCheckedChange={(checked) =>
+                      onEnvironmentChange({
+                        ...environment,
+                        realtimeTimeEnabled: checked === true,
+                      })
+                    }
+                  />
+                  <span>实时当前时间</span>
+                </label>
                 <SliderField
                   label="时间"
                   min={0}
@@ -810,7 +887,10 @@ export function RightInspector({
                   value={environment.timeOfDay}
                   formatValue={(value) => `${String(value).padStart(2, "0")}:00`}
                   onChange={(timeOfDay) =>
-                    onEnvironmentChange(getSolarEnvironmentPreset(timeOfDay, environment))
+                    onEnvironmentChange({
+                      ...getSolarEnvironmentPreset(timeOfDay, environment),
+                      realtimeTimeEnabled: false,
+                    })
                   }
                 />
                 <div className="grid grid-cols-4 gap-1 text-[10px] text-muted-foreground">
@@ -904,6 +984,12 @@ export function RightInspector({
                       <span className="text-muted-foreground">已选零件</span>
                       <Badge>{selectedCount}</Badge>
                     </div>
+                    {selectionTransform ? (
+                      <CompactDimensionRows
+                        size={selectionTransform.size}
+                        center={selectionTransform.center}
+                      />
+                    ) : null}
                   </AccordionPanel>
                   <AccordionPanel value="size" title="尺寸与缩放">
                     <SizeScalePanel
@@ -911,6 +997,7 @@ export function RightInspector({
                       metadata={null}
                       onScaleChange={onScaleChange}
                       onSizeChange={onSizeChange}
+                      onCenterChange={onCenterChange}
                       onUniformScale={onUniformScale}
                     />
                   </AccordionPanel>
@@ -943,9 +1030,22 @@ export function RightInspector({
                     <InfoRow label="绑定组" value={metadata.bindingGroupId ?? "-"} />
                     <InfoRow label="HA实体" value={metadata.entityId ?? "-"} />
                     <InfoRow label="UUID" value={metadata.id} />
+                    {selectionTransform ? (
+                      <>
+                        <Separator />
+                        <CompactDimensionRows
+                          size={selectionTransform.size}
+                          center={selectionTransform.center}
+                        />
+                      </>
+                    ) : null}
                   </AccordionPanel>
                   <AccordionPanel value="position" title="位置">
-                    <VectorFields value={metadata.position} onChange={onPositionChange} />
+                    <VectorFields
+                      labels={["X", "高度Y", "Z"]}
+                      value={metadata.position}
+                      onChange={onPositionChange}
+                    />
                   </AccordionPanel>
                   <AccordionPanel value="size" title="尺寸与缩放">
                     <SizeScalePanel
@@ -953,6 +1053,7 @@ export function RightInspector({
                       metadata={metadata}
                       onScaleChange={onScaleChange}
                       onSizeChange={onSizeChange}
+                      onCenterChange={onCenterChange}
                       onUniformScale={onUniformScale}
                     />
                   </AccordionPanel>

@@ -42,6 +42,7 @@ export type SelectionTransformInfo = {
 
 export type EnvironmentConfig = {
   timeOfDay: number;
+  realtimeTimeEnabled?: boolean;
   ambientIntensity: number;
   directionalIntensity: number;
   directionalPosition: Vector3Values;
@@ -52,9 +53,11 @@ export type EnvironmentConfig = {
 };
 
 export type ViewMode = "perspective" | "top" | "front" | "side";
+export type PreviewCameraMode = "manual" | "auto";
 
 export const defaultEnvironment: EnvironmentConfig = {
   timeOfDay: 12,
+  realtimeTimeEnabled: true,
   ambientIntensity: 0.78,
   directionalIntensity: 1.45,
   directionalPosition: { x: 0, y: 11, z: 7.5 },

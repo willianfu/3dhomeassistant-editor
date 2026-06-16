@@ -310,7 +310,7 @@ export function PartsTree({
                   <div>
                     <div className="text-sm font-medium">暂无模型零件</div>
                     <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                      上传 GLB 或 GLTF 后会自动解析模型层级。
+                      上传 GLB、GLTF 或 OBJ 后会自动解析模型层级。
                     </div>
                   </div>
                   <Button size="sm" onClick={onUploadClick}>

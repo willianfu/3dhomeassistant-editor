@@ -6,7 +6,12 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
-import type { EnvironmentConfig, Vector3Values, ViewMode } from "../types/editor";
+import type {
+  EnvironmentConfig,
+  PreviewCameraMode,
+  Vector3Values,
+  ViewMode,
+} from "../types/editor";
 import {
   defaultWeather,
   getWeatherPreset,
@@ -51,7 +56,6 @@ import {
   resolveLightRenderIntensity,
 } from "./ha-capabilities/light";
 import { getBoundEntityIds } from "./ha-bindings";
-import { resolveHaPanelMarkerPosition } from "./ha-panel-marker";
 import { groupObjectsPreservingWorldTransform } from "./model-grouping";
 import {
   ensureModelObjectIds,
@@ -96,10 +100,8 @@ type HaLightRig = {
 
 type HaPanelMarker = {
   group: THREE.Group;
-  core: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
-  halo: THREE.Sprite;
+  helpers: THREE.BoxHelper[];
   objectIds: string[];
-  baseScale: number;
 };
 
 type WeatherLineEffect = {
@@ -127,6 +129,8 @@ type WeatherCloud = {
   speed: number;
   minX: number;
   maxX: number;
+  minZ: number;
+  maxZ: number;
 };
 
 type WeatherBounds = {
@@ -139,6 +143,15 @@ type WeatherBounds = {
   skyPadding: number;
   minZ: number;
   maxZ: number;
+};
+
+type PreviewCameraTransition = {
+  startTime: number;
+  duration: number;
+  fromPosition: THREE.Vector3;
+  toPosition: THREE.Vector3;
+  fromTarget: THREE.Vector3;
+  toTarget: THREE.Vector3;
 };
 
 function colorTemperatureToColor(kelvin: number) {
@@ -218,8 +231,16 @@ export class ThreeEditor {
   private multiSelectionGroup = new THREE.Group();
   private viewMode: ViewMode = "perspective";
   private previewMode = false;
+  private previewCameraMode: PreviewCameraMode = "manual";
+  private previewCameraTransition: PreviewCameraTransition | null = null;
   private environmentConfig: EnvironmentConfig = defaultEnvironment;
   private dragStart: { x: number; y: number } | null = null;
+  private pointerDownState: {
+    x: number;
+    y: number;
+    button: number;
+    shiftKey: boolean;
+  } | null = null;
   private dragBoxElement: HTMLDivElement | null = null;
   private destroyed = false;
   private lastSize = { width: 0, height: 0 };
@@ -363,13 +384,11 @@ export class ThreeEditor {
     this.clearHistory();
     const url = URL.createObjectURL(file);
     try {
-      const gltf = await this.loader.loadAsync(url, (event) => {
-        if (event.total > 0) {
-          this.options.onLoadProgress?.(event.loaded / event.total);
-        }
-      });
-      const root = gltf.scene;
-      root.name = root.name || file.name.replace(/\.(glb|gltf)$/i, "");
+      const root = await this.loadObjectFromUrl(
+        url,
+        file.name.replace(/\.(glb|gltf|obj)$/i, ""),
+        file.name,
+      );
       ensureModelObjectIds(root);
       this.prepareModel(root);
       this.modelRoot = root;
@@ -409,9 +428,13 @@ export class ThreeEditor {
     return root;
   }
 
-  async addModelFromUrl(url: string, name = "model") {
+  async addModelFromUrl(
+    url: string,
+    name = "model",
+    placement?: { clientX: number; clientY: number },
+  ) {
     const object = await this.loadObjectFromUrl(url, name);
-    return this.addModelObject(object, name);
+    return this.addModelObject(object, name, placement);
   }
 
   async addModelFromFile(file: File) {
@@ -565,6 +588,32 @@ export class ThreeEditor {
     );
     this.scaleSelectionAroundCenter(objects, center, ratios);
     this.pushTransformHistory("调整尺寸", before, this.captureSnapshots(objects));
+  }
+
+  updateSelectionCenter(targetCenter: Vector3Values) {
+    const objects = this.getSelectedObjects();
+    const box = this.getSelectionBox(objects);
+    if (!box) {
+      return;
+    }
+    const currentCenter = box.getCenter(new THREE.Vector3());
+    const nextCenter = new THREE.Vector3(targetCenter.x, targetCenter.y, targetCenter.z);
+    const delta = nextCenter.sub(currentCenter);
+    if (delta.lengthSq() === 0) {
+      return;
+    }
+    const before = this.captureSnapshots(objects);
+    for (const object of objects) {
+      if (!object.parent) {
+        continue;
+      }
+      const worldPosition = object.getWorldPosition(new THREE.Vector3()).add(delta);
+      object.position.copy(object.parent.worldToLocal(worldPosition));
+    }
+    this.updateSelectionBox();
+    this.updateTransformControls();
+    this.options.onModelChange?.();
+    this.pushTransformHistory("移动中心点", before, this.captureSnapshots(objects));
   }
 
   scaleSelectionUniform(multiplier: number) {
@@ -869,7 +918,7 @@ export class ThreeEditor {
         this.createHaPanelMarker(marker.id, marker.objectIds),
       );
     }
-    this.updateHaPanelMarkers(performance.now());
+    this.updateHaPanelMarkers();
   }
 
   markSaved() {
@@ -890,10 +939,12 @@ export class ThreeEditor {
   }
 
   setWeather(config: WeatherConfig) {
-    if (this.weatherConfig.mode === config.mode) {
+    const modeChanged = this.weatherConfig.mode !== config.mode;
+    this.weatherConfig = config;
+    if (!modeChanged) {
+      this.applyWeatherAtmosphere();
       return;
     }
-    this.weatherConfig = config;
     this.rebuildWeatherEffects();
     this.applyWeatherAtmosphere();
   }
@@ -912,13 +963,22 @@ export class ThreeEditor {
       this.updateWallTransparency();
       return;
     }
+    this.previewCameraTransition = null;
     this.updateSelectionBox();
     this.updateTransformControls();
     this.updateWallTransparency();
   }
 
+  setPreviewCameraMode(mode: PreviewCameraMode) {
+    this.previewCameraMode = mode;
+    if (mode === "manual") {
+      this.previewCameraTransition = null;
+    }
+  }
+
   setViewMode(mode: ViewMode) {
     this.viewMode = mode;
+    this.previewCameraTransition = null;
     if (!this.controls || !this.modelRoot || !this.camera || !this.orthoCamera) {
       return;
     }
@@ -1025,14 +1085,87 @@ export class ThreeEditor {
     return root;
   }
 
-  private addModelObject(object: THREE.Object3D, name: string) {
+  private getModelContentBox(excluded?: THREE.Object3D) {
+    if (!this.modelRoot) {
+      return null;
+    }
+    const box = new THREE.Box3();
+    let hasContent = false;
+    this.modelRoot.traverse((node) => {
+      if (node === excluded || (excluded && node.parent === excluded)) {
+        return;
+      }
+      if ((node as THREE.Mesh).isMesh) {
+        box.expandByObject(node);
+        hasContent = true;
+      }
+    });
+    return hasContent && !box.isEmpty() ? box : null;
+  }
+
+  private resolveDropPointOnGround(clientX: number, clientY: number) {
+    if (!this.renderer || !this.camera) {
+      return null;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const groundY = this.getModelContentBox()?.min.y ?? 0;
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -groundY);
+    const point = new THREE.Vector3();
+    return this.raycaster.ray.intersectPlane(plane, point) ? point : null;
+  }
+
+  private resolveDefaultAddPoint(object: THREE.Object3D) {
+    const contentBox = this.getModelContentBox(object);
+    if (!contentBox) {
+      return new THREE.Vector3(0, 0, 0);
+    }
+    const size = contentBox.getSize(new THREE.Vector3());
+    const margin = Math.max(Math.min(Math.max(size.x, size.z) * 0.08, 2), 0.5);
+    return new THREE.Vector3(
+      contentBox.max.x + margin,
+      contentBox.min.y,
+      contentBox.getCenter(new THREE.Vector3()).z,
+    );
+  }
+
+  private placeAddedModelObject(
+    object: THREE.Object3D,
+    placement?: { clientX: number; clientY: number },
+  ) {
+    const objectBox = new THREE.Box3().setFromObject(object);
+    if (objectBox.isEmpty()) {
+      return;
+    }
+    const objectCenter = objectBox.getCenter(new THREE.Vector3());
+    const objectBottom = objectBox.min.y;
+    const target =
+      placement
+        ? this.resolveDropPointOnGround(placement.clientX, placement.clientY) ??
+          this.resolveDefaultAddPoint(object)
+        : this.resolveDefaultAddPoint(object);
+    const delta = new THREE.Vector3(
+      target.x - objectCenter.x,
+      target.y - objectBottom,
+      target.z - objectCenter.z,
+    );
+    object.position.add(delta);
+  }
+
+  private addModelObject(
+    object: THREE.Object3D,
+    name: string,
+    placement?: { clientX: number; clientY: number },
+  ) {
     const root = this.ensureModelRoot();
     object.name = object.name || name;
     ensureModelObjectIds(object);
     this.prepareModel(object);
+    this.placeAddedModelObject(object, placement);
     root.add(object);
     this.rebuildObjectMap();
-    this.frameObject(object);
     this.setViewMode(this.viewMode);
     this.rebuildWeatherEffects();
     this.selectObject(object.uuid);
@@ -1125,6 +1258,43 @@ export class ThreeEditor {
     this.controls.update();
   }
 
+  private focusPreviewCameraOnObject(object: THREE.Object3D) {
+    if (!this.camera || !this.controls || this.viewMode !== "perspective") {
+      return;
+    }
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) {
+      return;
+    }
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const maxSize = Math.max(size.x, size.y, size.z, 0.6);
+    const currentDirection = this.camera.position
+      .clone()
+      .sub(this.controls.target)
+      .normalize();
+    if (currentDirection.lengthSq() === 0) {
+      currentDirection.set(0.9, 0.55, 1).normalize();
+    }
+    const distance = Math.max(
+      maxSize / (2 * Math.tan((this.camera.fov * Math.PI) / 360)) * 1.7,
+      2.5,
+    );
+    const minHeight = Math.max(size.y * 0.22, 0.35);
+    const toPosition = center
+      .clone()
+      .add(currentDirection.multiplyScalar(distance));
+    toPosition.y = Math.max(toPosition.y, center.y + minHeight);
+    this.previewCameraTransition = {
+      startTime: performance.now(),
+      duration: 850,
+      fromPosition: this.camera.position.clone(),
+      toPosition,
+      fromTarget: this.controls.target.clone(),
+      toTarget: center,
+    };
+  }
+
   private updateSelectionBox() {
     this.clearMultiSelectionHelpers();
     if (this.previewMode) {
@@ -1180,9 +1350,21 @@ export class ThreeEditor {
     if (this.viewMode !== "perspective") {
       return;
     }
+    this.pointerDownState = {
+      x: event.clientX,
+      y: event.clientY,
+      button: event.button,
+      shiftKey: event.shiftKey,
+    };
+  };
+
+  private pickSelectableAt(clientX: number, clientY: number) {
+    if (!this.renderer || !this.camera || !this.modelRoot) {
+      return null;
+    }
     const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const meshes: THREE.Object3D[] = [];
     this.modelRoot.traverse((node) => {
@@ -1191,19 +1373,8 @@ export class ThreeEditor {
       }
     });
     const [hit] = this.raycaster.intersectObjects(meshes, true);
-    if (!hit) {
-      if (!event.shiftKey) {
-        this.selectObject(null);
-      }
-      return;
-    }
-    const target = this.resolveSelectable(hit.object);
-    if (event.shiftKey && !this.previewMode) {
-      this.toggleObjectSelection(target.uuid);
-      return;
-    }
-    this.selectObject(target.uuid);
-  };
+    return hit ? this.resolveSelectable(hit.object) : null;
+  }
 
   private handleContextMenu = (event: MouseEvent) => {
     if (this.viewMode !== "perspective") {
@@ -1223,7 +1394,37 @@ export class ThreeEditor {
   };
 
   private handlePointerUp = (event: PointerEvent) => {
-    if (!this.renderer || !this.dragStart || this.viewMode === "perspective") {
+    if (this.viewMode === "perspective") {
+      const pointerDownState = this.pointerDownState;
+      this.pointerDownState = null;
+      if (!pointerDownState || pointerDownState.button !== 0) {
+        return;
+      }
+      const moved = Math.hypot(
+        event.clientX - pointerDownState.x,
+        event.clientY - pointerDownState.y,
+      );
+      if (moved > 4) {
+        return;
+      }
+      const target = this.pickSelectableAt(event.clientX, event.clientY);
+      if (!target) {
+        if (!pointerDownState.shiftKey) {
+          this.selectObject(null);
+        }
+        return;
+      }
+      if (pointerDownState.shiftKey && !this.previewMode) {
+        this.toggleObjectSelection(target.uuid);
+        return;
+      }
+      this.selectObject(target.uuid);
+      if (this.previewMode && this.previewCameraMode === "auto") {
+        this.focusPreviewCameraOnObject(target);
+      }
+      return;
+    }
+    if (!this.renderer || !this.dragStart) {
       return;
     }
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -1268,9 +1469,10 @@ export class ThreeEditor {
       this.options.onFpsChange?.(fps);
     }
     this.resizeIfNeeded();
+    this.updatePreviewCameraTransition(now);
     this.controls?.update();
     this.updateWeatherEffects();
-    this.updateHaPanelMarkers(now);
+    this.updateHaPanelMarkers();
     this.renderer.render(this.scene, this.getActiveCamera());
     this.animationFrame = requestAnimationFrame(this.animate);
   };
@@ -1614,7 +1816,11 @@ export class ThreeEditor {
     if (preset.rain.count > 0) {
       this.weatherRain = this.createLineWeatherEffect({
         kind: "rain",
-        count: resolveWeatherRainParticleCount(preset.rain.count, sceneSpan),
+        count: resolveWeatherRainParticleCount(
+          preset.mode,
+          preset.rain.count,
+          sceneSpan,
+        ),
         speed: resolveWeatherRainSpeed(preset.rain.speed, sceneSpan),
         drift: preset.rain.windDrift * weatherScale,
         opacity: preset.rain.opacity,
@@ -1687,20 +1893,50 @@ export class ThreeEditor {
     }
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
-    const sceneSpan = Math.max(size.x, size.z, 10);
+    const sceneSpan = Math.max(size.x, size.z, 1);
     const span = resolveWeatherEffectSpan(sceneSpan);
     const skyPadding = resolveWeatherSkyPadding(sceneSpan, size.y);
+    const xPadding = Math.max((span - size.x) / 2, 6);
+    const zPadding = Math.max((span - size.z) / 2, 6);
     return {
       center,
-      minX: center.x - span / 2,
-      maxX: center.x + span / 2,
+      minX: box.min.x - xPadding,
+      maxX: box.max.x + xPadding,
       minY: box.min.y,
       maxY: box.max.y + skyPadding,
       modelTop: box.max.y,
       skyPadding,
-      minZ: center.z - span / 2,
-      maxZ: center.z + span / 2,
+      minZ: box.min.z - zPadding,
+      maxZ: box.max.z + zPadding,
     };
+  }
+
+  private updatePreviewCameraTransition(now: number) {
+    const transition = this.previewCameraTransition;
+    if (!transition || !this.camera || !this.controls) {
+      return;
+    }
+    const ratio = THREE.MathUtils.clamp(
+      (now - transition.startTime) / transition.duration,
+      0,
+      1,
+    );
+    const eased = ratio < 0.5
+      ? 4 * ratio * ratio * ratio
+      : 1 - Math.pow(-2 * ratio + 2, 3) / 2;
+    this.camera.position.lerpVectors(
+      transition.fromPosition,
+      transition.toPosition,
+      eased,
+    );
+    this.controls.target.lerpVectors(
+      transition.fromTarget,
+      transition.toTarget,
+      eased,
+    );
+    if (ratio >= 1) {
+      this.previewCameraTransition = null;
+    }
   }
 
   private createLineWeatherEffect({
@@ -1863,6 +2099,7 @@ export class ThreeEditor {
       const sprite = new THREE.Sprite(material);
       const scale = resolveWeatherCloudScale(
         THREE.MathUtils.lerp(3.8, 8.5, Math.random()) * weatherScale,
+        preset.mode,
       );
       sprite.scale.set(scale * 1.8, scale * 0.58, 1);
       sprite.position.set(
@@ -1877,6 +2114,8 @@ export class ThreeEditor {
         speed: preset.cloud.speed * THREE.MathUtils.lerp(0.5, 1.4, Math.random()),
         minX: bounds.minX - wrapPadding,
         maxX: bounds.maxX + wrapPadding,
+        minZ: bounds.minZ - wrapPadding,
+        maxZ: bounds.maxZ + wrapPadding,
       });
     }
   }
@@ -1922,7 +2161,7 @@ export class ThreeEditor {
     const sprite = new THREE.Sprite(material);
     const bounds = this.getWeatherBounds();
     sprite.position.set(bounds.maxX - 2, bounds.maxY - 1, bounds.minZ + 2);
-    const scale = resolveWeatherSunScale(5.5, this.getWeatherSceneSpan());
+    const scale = resolveWeatherSunScale(2.5, this.getWeatherSceneSpan());
     sprite.scale.set(scale, scale, 1);
     sprite.renderOrder = -5;
     this.weatherGroup.add(sprite);
@@ -1950,88 +2189,48 @@ export class ThreeEditor {
     const group = new THREE.Group();
     group.name = `HA active panel marker ${id}`;
     group.userData.selectable = false;
-
-    const coreMaterial = new THREE.MeshBasicMaterial({
-      color: 0x4fffe2,
-      transparent: true,
-      opacity: 0.9,
-      depthTest: false,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    const core = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), coreMaterial);
-    core.userData.selectable = false;
-    core.renderOrder = 25;
-    group.add(core);
-
-    const haloMaterial = new THREE.SpriteMaterial({
-      map: this.createHaPanelMarkerTexture(),
-      color: 0x58fff0,
-      transparent: true,
-      opacity: 0.42,
-      depthTest: false,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    const halo = new THREE.Sprite(haloMaterial);
-    halo.userData.selectable = false;
-    halo.renderOrder = 24;
-    group.add(halo);
-
     this.scene.add(group);
-    return { group, core, halo, objectIds, baseScale: 0.6 };
+    return { group, helpers: [], objectIds };
   }
 
-  private createHaPanelMarkerTexture() {
-    const canvas = document.createElement("canvas");
-    canvas.width = 96;
-    canvas.height = 96;
-    const context = canvas.getContext("2d");
-    if (context) {
-      const gradient = context.createRadialGradient(48, 48, 4, 48, 48, 46);
-      gradient.addColorStop(0, "rgba(255,255,255,0.95)");
-      gradient.addColorStop(0.28, "rgba(92,255,238,0.62)");
-      gradient.addColorStop(1, "rgba(92,255,238,0)");
-      context.fillStyle = gradient;
-      context.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    return texture;
-  }
-
-  private updateHaPanelMarkers(now: number) {
+  private updateHaPanelMarkers() {
     if (this.haPanelMarkers.size === 0) {
       return;
     }
-    const pulse = (Math.sin(now * 0.006) + 1) / 2;
-    const beat = 0.72 + pulse * 0.28;
     for (const [id, marker] of this.haPanelMarkers) {
       const objects = marker.objectIds
         .map((objectId) => this.objectMap.get(objectId))
         .filter((object): object is THREE.Object3D => Boolean(object));
-      const position = resolveHaPanelMarkerPosition(objects);
-      if (!position) {
+      if (objects.length === 0) {
         this.disposeHaPanelMarker(marker);
         this.haPanelMarkers.delete(id);
         continue;
       }
-      marker.group.position.copy(position);
-      const scale = marker.baseScale * beat;
-      marker.core.scale.setScalar(scale);
-      marker.halo.scale.setScalar(marker.baseScale * (4.4 + pulse * 1.2));
-      marker.core.material.opacity = 0.72 + pulse * 0.22;
-      (marker.halo.material as THREE.SpriteMaterial).opacity = 0.24 + pulse * 0.24;
+      if (marker.helpers.length !== objects.length) {
+        for (const helper of marker.helpers) {
+          marker.group.remove(helper);
+          helper.geometry.dispose();
+        }
+        marker.helpers = objects.map((object) => {
+          const helper = new THREE.BoxHelper(object, 0x29d3c4);
+          helper.material.depthTest = false;
+          helper.renderOrder = 24;
+          helper.userData.selectable = false;
+          marker.group.add(helper);
+          return helper;
+        });
+      }
+      marker.helpers.forEach((helper, index) => {
+        helper.setFromObject(objects[index]);
+      });
     }
   }
 
   private disposeHaPanelMarker(marker: HaPanelMarker) {
     this.scene.remove(marker.group);
-    marker.core.geometry.dispose();
-    marker.core.material.dispose();
-    const haloMaterial = marker.halo.material as THREE.SpriteMaterial;
-    haloMaterial.map?.dispose();
-    haloMaterial.dispose();
+    for (const helper of marker.helpers) {
+      helper.geometry.dispose();
+    }
     marker.group.clear();
   }
 
@@ -2148,6 +2347,11 @@ export class ThreeEditor {
       cloud.sprite.position.x += cloud.speed * delta;
       if (cloud.sprite.position.x > cloud.maxX) {
         cloud.sprite.position.x = cloud.minX;
+        cloud.sprite.position.z = THREE.MathUtils.lerp(
+          cloud.minZ,
+          cloud.maxZ,
+          Math.random(),
+        );
       }
     }
     this.updateLightning(delta);

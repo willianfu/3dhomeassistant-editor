@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { EnvironmentConfig } from "../types/editor";
+import { defaultEnvironment, type EnvironmentConfig } from "../types/editor";
 import type {
   HaBinding,
   HaLightCapabilityConfig,
@@ -8,6 +8,7 @@ import type {
 import type { HaRuntimeConfig } from "./ha-config";
 import { defaultHaRuntimeConfig } from "./ha-config";
 import type { WeatherConfig } from "./weather-presets";
+import { defaultWeather } from "./weather-presets";
 import {
   getLightCapabilityConfig,
   getManualDeviceType,
@@ -19,6 +20,7 @@ import {
 } from "./model-identity";
 
 export const EDITOR_LOCAL_CONFIG_KEY = "3dhomeassistant.editor.config";
+const legacyDefaultWeatherLocation = "116.41,39.92";
 
 type StorageLike = {
   getItem: (key: string) => string | null;
@@ -120,7 +122,19 @@ export function loadEditorLocalConfig(
     }
     return {
       ...parsed,
+      environment: {
+        ...defaultEnvironment,
+        ...(parsed.environment ?? {}),
+      },
       ha: parsed.ha ?? defaultHaRuntimeConfig(),
+      weather: {
+        ...defaultWeather,
+        ...(parsed.weather ?? {}),
+        qweatherLocation:
+          parsed.weather?.qweatherLocation === legacyDefaultWeatherLocation
+            ? defaultWeather.qweatherLocation
+            : (parsed.weather?.qweatherLocation ?? defaultWeather.qweatherLocation),
+      },
     };
   } catch {
     return null;

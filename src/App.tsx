@@ -23,6 +23,8 @@ import {
 import { defaultHaRuntimeConfig, type HaRuntimeConfig } from "./lib/ha-config";
 import { cn } from "./lib/utils";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
+import { fetchQWeatherNow } from "./lib/qweather";
+import { getSolarEnvironmentPreset } from "./lib/environment-lighting";
 import {
   MODEL_LIBRARY_DRAG_TYPE,
   isSupportedModelFile,
@@ -44,6 +46,7 @@ import type {
   EnvironmentConfig,
   ModelTreeNode,
   ObjectMetadata,
+  PreviewCameraMode,
   SelectionTransformInfo,
   ViewMode,
   Vector3Values,
@@ -84,7 +87,7 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 function isSupportedModel(file: File) {
-  return /\.(glb|gltf)$/i.test(file.name);
+  return isSupportedModelFile(file);
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -108,6 +111,8 @@ export default function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
+  const [previewCameraMode, setPreviewCameraMode] =
+    useState<PreviewCameraMode>("manual");
   const [fullscreen, setFullscreen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("perspective");
   const [isLoading, setIsLoading] = useState(false);
@@ -134,6 +139,7 @@ export default function App() {
   const [weather, setWeather] = useState<WeatherConfig>(
     localConfigRef.current?.weather ?? defaultWeather,
   );
+  const [weatherStatus, setWeatherStatus] = useState<string | null>(null);
 
   useEffect(() => {
     const handleFullscreenChange = () => setFullscreen(isFullscreen());
@@ -231,6 +237,75 @@ export default function App() {
   }, [editor, weather]);
 
   useEffect(() => {
+    if (!(environment.realtimeTimeEnabled ?? true)) {
+      return;
+    }
+    const applyCurrentTime = () => {
+      const hour = new Date().getHours();
+      setEnvironment((current) => ({
+        ...getSolarEnvironmentPreset(hour, current),
+        realtimeTimeEnabled: true,
+      }));
+    };
+    applyCurrentTime();
+    const timer = window.setInterval(applyCurrentTime, 60_000);
+    return () => window.clearInterval(timer);
+  }, [environment.realtimeTimeEnabled]);
+
+  useEffect(() => {
+    if (!(weather.realtimeEnabled ?? true)) {
+      setWeatherStatus(null);
+      return;
+    }
+    if (!weather.qweatherApiKey?.trim() || !weather.qweatherLocation?.trim()) {
+      setWeatherStatus("实时天气：请配置和风天气 API Key 和位置");
+      return;
+    }
+    let cancelled = false;
+    const loadRealtimeWeather = async () => {
+      setWeatherStatus("实时天气：更新中");
+      try {
+        const result = await fetchQWeatherNow({
+          apiKey: weather.qweatherApiKey?.trim() ?? "",
+          location: weather.qweatherLocation?.trim() ?? "",
+          apiHost: weather.qweatherApiHost?.trim() || undefined,
+        });
+        if (cancelled) {
+          return;
+        }
+        setWeather((current) =>
+          current.realtimeEnabled
+            ? {
+                ...current,
+                mode: result.mode,
+              }
+            : current,
+        );
+        setWeatherStatus(`实时天气：${result.now.text ?? result.mode}`);
+      } catch (weatherError) {
+        if (!cancelled) {
+          setWeatherStatus(
+            weatherError instanceof Error
+              ? weatherError.message
+              : "实时天气更新失败",
+          );
+        }
+      }
+    };
+    void loadRealtimeWeather();
+    const timer = window.setInterval(loadRealtimeWeather, 10 * 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    weather.realtimeEnabled,
+    weather.qweatherApiKey,
+    weather.qweatherLocation,
+    weather.qweatherApiHost,
+  ]);
+
+  useEffect(() => {
     editor?.setViewMode(viewMode);
     if (viewMode === "perspective") {
       editor?.setEnvironment(environment);
@@ -245,6 +320,10 @@ export default function App() {
       setBindingDialogOpen(false);
     }
   }, [editor, environment, previewMode]);
+
+  useEffect(() => {
+    editor?.setPreviewCameraMode(previewCameraMode);
+  }, [editor, previewCameraMode]);
 
   useEffect(() => {
     editor?.applyHaStates(ha.states);
@@ -347,7 +426,7 @@ export default function App() {
       return;
     }
     if (!isSupportedModel(file)) {
-      setError("仅支持上传 .glb 或 .gltf 模型文件。");
+      setError("仅支持上传 .glb、.gltf 或 .obj 模型文件。");
       return;
     }
 
@@ -393,14 +472,17 @@ export default function App() {
     }
   };
 
-  const handleAddLibraryModel = async (item: ModelLibraryItem) => {
+  const handleAddLibraryModel = async (
+    item: ModelLibraryItem,
+    placement?: { clientX: number; clientY: number },
+  ) => {
     if (!editor) {
       return;
     }
     setError(null);
     setIsLoading(true);
     try {
-      await editor.addModelFromUrl(item.url, item.name);
+      await editor.addModelFromUrl(item.url, item.name, placement);
       refreshTree();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "模型加载失败。");
@@ -421,13 +503,16 @@ export default function App() {
     event.dataTransfer.setData("text/plain", item.name);
   };
 
-  const handleViewportDrop = async (dataTransfer: DataTransfer) => {
+  const handleViewportDrop = async (
+    dataTransfer: DataTransfer,
+    point: { clientX: number; clientY: number },
+  ) => {
     const payload = dataTransfer.getData(MODEL_LIBRARY_DRAG_TYPE);
     const item = payload ? parseModelLibraryDragItem(payload) : null;
     if (!item) {
       return;
     }
-    await handleAddLibraryModel(item);
+    await handleAddLibraryModel(item, point);
   };
 
   const canDropLibraryModel = (dataTransfer: DataTransfer) =>
@@ -502,6 +587,11 @@ export default function App() {
     refreshTree();
   };
 
+  const handleCenterChange = (center: Vector3Values) => {
+    editor?.updateSelectionCenter(center);
+    refreshTree();
+  };
+
   const handleUniformScale = (multiplier: number) => {
     editor?.scaleSelectionUniform(multiplier);
     refreshTree();
@@ -545,6 +635,7 @@ export default function App() {
         hasModel={Boolean(tree)}
         isLoading={isLoading}
         previewMode={previewMode}
+        previewCameraMode={previewCameraMode}
         leftCollapsed={leftCollapsed}
         rightCollapsed={rightCollapsed}
         viewMode={viewMode}
@@ -552,10 +643,12 @@ export default function App() {
         haStatus={ha.status}
         haStatusMessage={ha.statusMessage}
         weather={weather}
+        weatherStatus={weatherStatus}
         fullscreen={fullscreen}
         onUploadClick={handleUploadClick}
         onExport={handleExport}
         onTogglePreview={() => setPreviewMode((value) => !value)}
+        onPreviewCameraModeChange={setPreviewCameraMode}
         onToggleFullscreen={() => void toggleFullscreen()}
         onRetryHaConnection={ha.retryConnection}
         onUndo={() => {
@@ -579,7 +672,7 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+        accept=".glb,.gltf,.obj,model/gltf-binary,model/gltf+json"
         className="hidden"
         onChange={handleFileChange}
       />
@@ -619,7 +712,9 @@ export default function App() {
           onHistoryChange={setHistoryState}
           onLoadProgress={() => undefined}
           canDropModel={canDropLibraryModel}
-          onModelDrop={(dataTransfer) => void handleViewportDrop(dataTransfer)}
+          onModelDrop={(dataTransfer, point) =>
+            void handleViewportDrop(dataTransfer, point)
+          }
           isLoading={isLoading}
           error={error}
           viewMode={viewMode}
@@ -649,6 +744,7 @@ export default function App() {
             onPositionChange={handlePositionChange}
             onScaleChange={handleScaleChange}
             onSizeChange={handleSizeChange}
+            onCenterChange={handleCenterChange}
             onUniformScale={handleUniformScale}
             onOpenBindingDialog={() => setBindingDialogOpen(true)}
             onBindingsChange={handleBindingsChange}

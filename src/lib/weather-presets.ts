@@ -11,6 +11,10 @@ export type WeatherMode =
 
 export type WeatherConfig = {
   mode: WeatherMode;
+  realtimeEnabled?: boolean;
+  qweatherApiKey?: string;
+  qweatherLocation?: string;
+  qweatherApiHost?: string;
 };
 
 export type WeatherPreset = {
@@ -50,6 +54,9 @@ export type WeatherPreset = {
 
 export const defaultWeather: WeatherConfig = {
   mode: "none",
+  realtimeEnabled: true,
+  qweatherLocation: "115.86,28.68",
+  qweatherApiHost: "https://devapi.qweather.com",
 };
 
 export const WEATHER_OPTIONS: Array<{
@@ -110,9 +117,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 12, opacity: 0.28, speed: 0.012 },
     lightning: { enabled: false, frequency: 0, intensity: 0, burstFrames: 0 },
     lighting: {
-      ambientMultiplier: 0.95,
-      directionalMultiplier: 0.72,
-      exposureOffset: -0.04,
+      ambientMultiplier: 1.04,
+      directionalMultiplier: 0.88,
+      exposureOffset: 0.02,
       background: 0x172231,
       fogDensity: 0.01,
     },
@@ -126,9 +133,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 18, opacity: 0.48, speed: 0.006 },
     lightning: { enabled: false, frequency: 0, intensity: 0, burstFrames: 0 },
     lighting: {
-      ambientMultiplier: 0.82,
-      directionalMultiplier: 0.35,
-      exposureOffset: -0.12,
+      ambientMultiplier: 0.96,
+      directionalMultiplier: 0.52,
+      exposureOffset: -0.02,
       background: 0x111820,
       fogDensity: 0.025,
     },
@@ -142,9 +149,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 10, opacity: 0.22, speed: 0.025 },
     lightning: { enabled: false, frequency: 0, intensity: 0, burstFrames: 0 },
     lighting: {
-      ambientMultiplier: 0.92,
-      directionalMultiplier: 0.7,
-      exposureOffset: -0.04,
+      ambientMultiplier: 1,
+      directionalMultiplier: 0.86,
+      exposureOffset: 0.02,
       background: 0x121e2c,
       fogDensity: 0.012,
     },
@@ -158,9 +165,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 12, opacity: 0.34, speed: 0.01 },
     lightning: { enabled: false, frequency: 0, intensity: 0, burstFrames: 0 },
     lighting: {
-      ambientMultiplier: 0.86,
-      directionalMultiplier: 0.48,
-      exposureOffset: -0.08,
+      ambientMultiplier: 0.98,
+      directionalMultiplier: 0.66,
+      exposureOffset: 0,
       background: 0x0f1720,
       fogDensity: 0.018,
     },
@@ -174,9 +181,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 16, opacity: 0.42, speed: 0.012 },
     lightning: { enabled: false, frequency: 0, intensity: 0, burstFrames: 0 },
     lighting: {
-      ambientMultiplier: 0.78,
-      directionalMultiplier: 0.38,
-      exposureOffset: -0.12,
+      ambientMultiplier: 0.92,
+      directionalMultiplier: 0.56,
+      exposureOffset: -0.03,
       background: 0x0c131b,
       fogDensity: 0.03,
     },
@@ -190,9 +197,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 20, opacity: 0.54, speed: 0.014 },
     lightning: { enabled: false, frequency: 0, intensity: 0, burstFrames: 0 },
     lighting: {
-      ambientMultiplier: 0.68,
-      directionalMultiplier: 0.28,
-      exposureOffset: -0.18,
+      ambientMultiplier: 0.86,
+      directionalMultiplier: 0.44,
+      exposureOffset: -0.08,
       background: 0x090f16,
       fogDensity: 0.045,
     },
@@ -206,9 +213,9 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     cloud: { count: 22, opacity: 0.58, speed: 0.018 },
     lightning: { enabled: true, frequency: 0.045, intensity: 18, burstFrames: 8 },
     lighting: {
-      ambientMultiplier: 0.62,
-      directionalMultiplier: 0.2,
-      exposureOffset: -0.2,
+      ambientMultiplier: 0.82,
+      directionalMultiplier: 0.38,
+      exposureOffset: -0.08,
       background: 0x070d15,
       fogDensity: 0.05,
     },
@@ -228,11 +235,11 @@ export function resolveWeatherFogDensity(baseDensity: number, sceneSpan: number)
 }
 
 export function resolveWeatherEffectSpan(sceneSpan: number) {
-  return Math.round(Math.max(sceneSpan + 18, 28));
+  return Math.round(Math.max(sceneSpan + 12, 24));
 }
 
 export function resolveWeatherEffectHeight(sceneHeight: number) {
-  return Math.round(Math.max(sceneHeight + 14, 16));
+  return Math.round(Math.max(sceneHeight + 20, 24));
 }
 
 export function resolveWeatherParticleCount(
@@ -248,11 +255,12 @@ export function resolveWeatherParticleCount(
 }
 
 const weatherCloudVolumeMultiplier = 3;
+const weatherCloudyVolumeMultiplier = 0.5;
 const cloudyDensityMultiplier = 2;
 const weatherRainDensityMultiplier = 0.7;
 const weatherRainSpeedMultiplier = 2;
-const weatherRainDropSizeMultiplier = 3;
-const weatherSkyHeightMultiplier = 6;
+const weatherRainDropSizeMultiplier = 1.05;
+const weatherSkyPaddingMeters = 20;
 const weatherLightningThicknessMultiplier = 3;
 const weatherSunScaleMultiplier = 3;
 const weatherSunOpacity = 0.9;
@@ -267,8 +275,9 @@ export function resolveWeatherCloudParticleCount(
   return mode === "cloudy" ? Math.round(count * cloudyDensityMultiplier) : count;
 }
 
-export function resolveWeatherCloudScale(baseScale: number) {
-  return baseScale * weatherCloudVolumeMultiplier;
+export function resolveWeatherCloudScale(baseScale: number, mode: WeatherMode = "none") {
+  const modeMultiplier = mode === "cloudy" ? weatherCloudyVolumeMultiplier : 1;
+  return baseScale * weatherCloudVolumeMultiplier * modeMultiplier;
 }
 
 export function resolveWeatherCloudAltitude(
@@ -289,13 +298,35 @@ export function resolveWeatherRainTop(modelTop: number, skyPadding: number) {
 }
 
 export function resolveWeatherRainParticleCount(
-  baseCount: number,
-  sceneSpan: number,
+  modeOrBaseCount: WeatherMode | number,
+  baseCountOrSceneSpan: number,
+  sceneSpanOrMaxMultiplier?: number,
   maxMultiplier = 5,
 ) {
+  const mode =
+    typeof modeOrBaseCount === "string" ? modeOrBaseCount : "none";
+  const baseCount =
+    typeof modeOrBaseCount === "string" ? baseCountOrSceneSpan : modeOrBaseCount;
+  const sceneSpan =
+    typeof modeOrBaseCount === "string"
+      ? (sceneSpanOrMaxMultiplier ?? 1)
+      : baseCountOrSceneSpan;
+  const resolvedMaxMultiplier =
+    typeof modeOrBaseCount === "string"
+      ? maxMultiplier
+      : (sceneSpanOrMaxMultiplier ?? maxMultiplier);
+  const modeMultiplier =
+    mode === "rain-light"
+      ? 0.8
+      : mode === "rain-medium"
+        ? 0.65
+        : mode === "rain-heavy" || mode === "lightning"
+          ? 0.5
+          : 1;
   return Math.round(
-    resolveWeatherParticleCount(baseCount, sceneSpan, maxMultiplier) *
-      weatherRainDensityMultiplier,
+    resolveWeatherParticleCount(baseCount, sceneSpan, resolvedMaxMultiplier) *
+      weatherRainDensityMultiplier *
+      modeMultiplier,
   );
 }
 
@@ -312,14 +343,11 @@ export function resolveWeatherScale(sceneSpan: number) {
 }
 
 export function resolveWeatherSkyPadding(sceneSpan: number, sceneHeight: number) {
-  const scalePadding = resolveWeatherScale(sceneSpan) * 8;
-  return Math.round(
-    Math.max(scalePadding, sceneHeight * 0.12, 6) * weatherSkyHeightMultiplier,
-  );
+  return Math.round(Math.max(weatherSkyPaddingMeters, sceneHeight * 0.08));
 }
 
 export function resolveWeatherSunScale(baseScale: number, sceneSpan: number) {
-  return baseScale * resolveWeatherScale(sceneSpan) * weatherSunScaleMultiplier;
+  return Math.max(1, baseScale);
 }
 
 export function resolveWeatherSunOpacity(baseOpacity: number) {

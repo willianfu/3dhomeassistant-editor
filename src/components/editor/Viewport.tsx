@@ -10,7 +10,10 @@ type ViewportProps = {
   onHistoryChange: (state: EditorHistoryState) => void;
   onLoadProgress: (progress: number) => void;
   canDropModel: (dataTransfer: DataTransfer) => boolean;
-  onModelDrop: (dataTransfer: DataTransfer) => void;
+  onModelDrop: (
+    dataTransfer: DataTransfer,
+    point: { clientX: number; clientY: number },
+  ) => void;
   isLoading: boolean;
   error: string | null;
   viewMode: ViewMode;
@@ -95,7 +98,10 @@ export function Viewport({
         onDrop={(event) => {
           if (canDropModel(event.dataTransfer)) {
             event.preventDefault();
-            onModelDrop(event.dataTransfer);
+            onModelDrop(event.dataTransfer, {
+              clientX: event.clientX,
+              clientY: event.clientY,
+            });
           }
         }}
       />
