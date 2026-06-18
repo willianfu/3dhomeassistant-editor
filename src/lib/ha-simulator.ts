@@ -43,8 +43,14 @@ export function applySimulatedServiceCall(
     next.state = "pressed";
   } else if (service === "open" || service === "open_cover") {
     next.state = "open";
+    if (domain === "cover") {
+      next.attributes.current_position = 100;
+    }
   } else if (service === "close" || service === "close_cover") {
     next.state = "closed";
+    if (domain === "cover") {
+      next.attributes.current_position = 0;
+    }
   } else if (service === "stop_cover") {
     next.state = "stopped";
   } else if (service === "lock") {
@@ -116,6 +122,24 @@ export function applySimulatedServiceCall(
     } else if (service === "set_swing_mode") {
       if (serviceData.swing_mode !== undefined) {
         next.attributes.swing_mode = serviceData.swing_mode;
+      }
+    }
+  }
+
+  if (domain === "media_player") {
+    if (service === "media_play") {
+      next.state = "playing";
+    } else if (service === "media_pause") {
+      next.state = "paused";
+    } else if (service === "media_stop") {
+      next.state = "idle";
+    } else if (service === "turn_on") {
+      next.state = "idle";
+    } else if (service === "turn_off") {
+      next.state = "off";
+    } else if (service === "volume_set") {
+      if (serviceData.volume_level !== undefined) {
+        next.attributes.volume_level = serviceData.volume_level;
       }
     }
   }

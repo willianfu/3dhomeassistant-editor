@@ -1,13 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import {
   BellRing,
   ChevronDown,
+  ChevronsLeftRight,
   DoorOpen,
   Gauge,
   Lock,
+  Pause,
+  Play,
   MousePointerClick,
   Power,
   RadioReceiver,
+  SkipBack,
+  SkipForward,
+  Square,
+  Volume2,
   ToggleLeft,
   ToggleRight,
 } from "lucide-react";
@@ -57,6 +64,38 @@ function optionList(state?: HaEntityState) {
     : [];
 }
 
+function clampPercent(value: number) {
+  return Math.min(Math.max(value, 0), 100);
+}
+
+function percentFromClientX(
+  clientX: number,
+  element: HTMLElement,
+  invert = false,
+  fallback = 0,
+) {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || !Number.isFinite(clientX)) {
+    return clampPercent(fallback);
+  }
+  const ratio = clampPercent(((clientX - rect.left) / rect.width) * 100);
+  return invert ? 100 - ratio : ratio;
+}
+
+function numericStateValue(
+  state: HaEntityState | undefined,
+  keys: string[],
+  fallback: number,
+) {
+  for (const key of keys) {
+    const value = Number(state?.attributes[key]);
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return fallback;
+}
+
 function EntityName({ name }: { name: string }) {
   return (
     <div className="max-w-[128px] truncate text-xs font-medium leading-5" title={name}>
@@ -69,6 +108,210 @@ function EntityCard({ children }: { children: React.ReactNode }) {
   return (
     <div className="grid min-w-0 gap-1.5 overflow-hidden rounded-md border border-border bg-background/60 p-2">
       {children}
+    </div>
+  );
+}
+
+function CoverCurtainSlider({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(value);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    setDraft(value);
+    draftRef.current = value;
+  }, [value]);
+
+  const updateDraft = (nextValue: number) => {
+    const next = clampPercent(nextValue);
+    draftRef.current = next;
+    setDraft(next);
+  };
+
+  const commitDraft = () => onCommit(draftRef.current);
+  const updateFromPointer = (event: PointerEvent<HTMLDivElement>) => {
+    const track = trackRef.current;
+    if (!track) {
+      return;
+    }
+    const next = percentFromClientX(event.clientX, track, false, draftRef.current);
+    updateDraft(next);
+  };
+  const startPointer = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    draggingRef.current = true;
+    updateFromPointer(event);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const movePointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (draggingRef.current) {
+      updateFromPointer(event);
+    }
+  };
+  const endPointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) {
+      return;
+    }
+    draggingRef.current = false;
+    updateFromPointer(event);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    commitDraft();
+  };
+
+  const left = (100 - draft) / 2;
+  const right = 100 - left;
+
+  return (
+    <div className="grid gap-1.5">
+      <div
+        ref={trackRef}
+        className="relative h-9 overflow-hidden rounded-md border border-sky-200 bg-sky-100 shadow-inner"
+        aria-label="窗帘开合比例"
+        onPointerDown={startPointer}
+        onPointerMove={movePointer}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+      >
+        <div
+          className="absolute inset-y-0 bg-sky-200/90"
+          style={{ left: `${left}%`, right: `${100 - right}%` }}
+        />
+        <div
+          className="absolute inset-y-1 left-1 rounded-sm bg-sky-500/85"
+          style={{ width: `${left}%` }}
+        />
+        <div
+          className="absolute inset-y-1 right-1 rounded-sm bg-sky-500/85"
+          style={{ width: `${100 - right}%` }}
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
+          style={{ left: `${left}%` }}
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
+          style={{ left: `${right}%` }}
+        />
+        <ChevronsLeftRight className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sky-900/60" />
+        <input
+          aria-label="窗帘开合滑条"
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={draft}
+          className="pointer-events-none absolute inset-0 z-10 size-full cursor-ew-resize opacity-0"
+          onChange={(event) => updateDraft(Number(event.target.value))}
+          onTouchEnd={commitDraft}
+          onKeyUp={commitDraft}
+        />
+      </div>
+      <div className="flex items-center justify-between px-0.5 text-[10px] text-muted-foreground">
+        <span>关闭</span>
+        <span>{draft}%</span>
+        <span>打开</span>
+      </div>
+    </div>
+  );
+}
+
+function MediaVolumeSlider({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(value);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    setDraft(value);
+    draftRef.current = value;
+  }, [value]);
+
+  const updateDraft = (nextValue: number) => {
+    const next = clampPercent(nextValue);
+    draftRef.current = next;
+    setDraft(next);
+  };
+
+  const commitDraft = () => onCommit(draftRef.current);
+  const updateFromPointer = (event: PointerEvent<HTMLDivElement>) => {
+    const track = trackRef.current;
+    if (!track) {
+      return;
+    }
+    const next = percentFromClientX(event.clientX, track, false, draftRef.current);
+    updateDraft(next);
+  };
+  const startPointer = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    draggingRef.current = true;
+    updateFromPointer(event);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const movePointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (draggingRef.current) {
+      updateFromPointer(event);
+    }
+  };
+  const endPointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) {
+      return;
+    }
+    draggingRef.current = false;
+    updateFromPointer(event);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    commitDraft();
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      className="relative h-[30px] overflow-hidden rounded-md border border-sky-200 bg-sky-100 shadow-inner"
+      aria-label="音量滑条"
+      onPointerDown={startPointer}
+      onPointerMove={movePointer}
+      onPointerUp={endPointer}
+      onPointerCancel={endPointer}
+    >
+      <div
+        className="absolute inset-y-0 bg-sky-200/90"
+        style={{ left: "0%", right: `${100 - draft}%` }}
+      />
+      <div
+        className="absolute inset-y-1 left-1 rounded-sm bg-sky-500/85"
+        style={{ width: `${draft}%` }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
+        style={{ left: `${draft}%` }}
+      />
+      <input
+        aria-label="音量"
+        type="range"
+        min={0}
+        max={100}
+        step={1}
+        value={draft}
+        className="pointer-events-none absolute inset-0 z-10 size-full cursor-ew-resize opacity-0"
+        onChange={(event) => updateDraft(Number(event.target.value))}
+        onTouchEnd={commitDraft}
+        onKeyUp={commitDraft}
+      />
     </div>
   );
 }
@@ -101,6 +344,9 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
   );
   const options = useMemo(() => optionList(state), [state]);
   const fanPercentage = Number(state?.attributes.percentage);
+  const mediaVolume = Math.round(
+    clampPercent(numericStateValue(state, ["volume_level"], 0.35) * 100),
+  );
 
   useEffect(() => {
     setBrightnessDraft(brightnessValue);
@@ -225,6 +471,99 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
     );
   }
 
+  if (domain === "media_player") {
+    const isPlaying = state?.state === "playing";
+    const source = String(
+      state?.attributes.media_title ??
+        state?.attributes.source ??
+        state?.attributes.app_name ??
+        "",
+    );
+    return (
+      <EntityCard>
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <EntityName name={name} />
+            {source ? (
+              <div className="truncate text-[10px] text-muted-foreground" title={source}>
+                {source}
+              </div>
+            ) : null}
+          </div>
+          <Badge variant={isPlaying ? "default" : "secondary"} className="shrink-0 px-1.5 text-[10px]">
+            {stateText}
+          </Badge>
+        </div>
+        <div className="grid grid-cols-5 gap-1">
+          <Button
+            size="icon"
+            variant="secondary"
+            className="size-8 rounded-md"
+            title="上一首"
+            onClick={() => onCall(entityId, "media_previous_track")}
+          >
+            <SkipBack data-icon="icon" />
+          </Button>
+          <Button
+            size="icon"
+            variant={isPlaying ? "default" : "secondary"}
+            className="size-8 rounded-md"
+            title={isPlaying ? "暂停" : "播放"}
+            onClick={() =>
+              onCall(entityId, isPlaying ? "media_pause" : "media_play")
+            }
+          >
+            {isPlaying ? <Pause data-icon="icon" /> : <Play data-icon="icon" />}
+          </Button>
+          <Button
+            size="icon"
+            variant="secondary"
+            className="size-8 rounded-md"
+            title="停止"
+            onClick={() => onCall(entityId, "media_stop")}
+          >
+            <Square data-icon="icon" />
+          </Button>
+          <Button
+            size="icon"
+            variant="secondary"
+            className="size-8 rounded-md"
+            title="下一首"
+            onClick={() => onCall(entityId, "media_next_track")}
+          >
+            <SkipForward data-icon="icon" />
+          </Button>
+          <Button
+            size="icon"
+            variant={state?.state === "off" ? "secondary" : "ghost"}
+            className="size-8 rounded-md"
+            title={state?.state === "off" ? "打开" : "关闭"}
+            onClick={() =>
+              onCall(entityId, state?.state === "off" ? "turn_on" : "turn_off")
+            }
+          >
+            <Power data-icon="icon" />
+          </Button>
+        </div>
+        <div className="grid gap-1">
+          <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
+              <Volume2 data-icon="inline-start" />
+              音量
+            </span>
+            <span>{mediaVolume}%</span>
+          </div>
+          <MediaVolumeSlider
+            value={mediaVolume}
+            onCommit={(volume) =>
+              onCall(entityId, "volume_set", { volume_level: volume / 100 })
+            }
+          />
+        </div>
+      </EntityCard>
+    );
+  }
+
   if (domain === "lock") {
     return (
       <EntityCard>
@@ -247,24 +586,28 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
   }
 
   if (domain === "cover") {
-    const position = Number(state?.attributes.current_position);
+    const position = clampPercent(
+      numericStateValue(state, ["current_position", "position"], 0),
+    );
+    const presetPositions = [0, 25, 55, 75, 100];
     return (
       <EntityCard>
-        <div className="flex items-center justify-between gap-2">
-          <EntityName name={name} />
-          {Number.isFinite(position) ? (
-            <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
-              {position}%
-            </Badge>
-          ) : null}
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <EntityName name={name} />
+          </div>
+          <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
+            {position}%
+          </Badge>
         </div>
-        <div className="grid grid-cols-3 gap-1">
+        <div className="grid grid-cols-4 gap-1">
           <Button
             size="sm"
             variant="secondary"
             className="h-7 min-w-0 px-2 text-xs"
             onClick={() => onCall(entityId, "open_cover")}
           >
+            <DoorOpen data-icon="inline-start" />
             打开
           </Button>
           <Button
@@ -273,7 +616,8 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
             className="h-7 min-w-0 px-2 text-xs"
             onClick={() => onCall(entityId, "stop_cover")}
           >
-            停止
+            <Pause data-icon="inline-start" />
+            暂停
           </Button>
           <Button
             size="sm"
@@ -281,19 +625,34 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
             className="h-7 min-w-0 px-2 text-xs"
             onClick={() => onCall(entityId, "close_cover")}
           >
+            <Square data-icon="inline-start" />
             关闭
           </Button>
-        </div>
-        {Number.isFinite(position) ? (
-          <Slider
-            min={0}
-            max={100}
-            value={[position]}
-            onValueCommit={([value]) =>
-              onCall(entityId, "set_cover_position", { position: value })
+          <Select
+            onValueChange={(value) =>
+              onCall(entityId, "set_cover_position", { position: Number(value) })
             }
-          />
-        ) : null}
+          >
+            <SelectTrigger className="h-7 min-w-0 px-2 text-xs">
+              <SelectValue placeholder="比例" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {presetPositions.map((preset) => (
+                  <SelectItem key={preset} value={String(preset)}>
+                    {preset}%
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+        <CoverCurtainSlider
+          value={position}
+          onCommit={(nextPosition) =>
+            onCall(entityId, "set_cover_position", { position: nextPosition })
+          }
+        />
       </EntityCard>
     );
   }

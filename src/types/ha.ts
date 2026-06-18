@@ -27,6 +27,7 @@ export type HaManualDeviceType =
   | "light"
   | "cover"
   | "climate"
+  | "media_player"
   | "switch"
   | "button"
   | "fan"

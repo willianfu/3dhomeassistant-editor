@@ -560,6 +560,7 @@ const DEVICE_TYPE_OPTIONS: Array<{ value: HaManualDeviceType; label: string }> =
   { value: "light", label: "灯光" },
   { value: "cover", label: "窗帘 / 门" },
   { value: "climate", label: "空调" },
+  { value: "media_player", label: "媒体播放器" },
   { value: "switch", label: "开关" },
   { value: "button", label: "按钮" },
   { value: "fan", label: "风扇" },

@@ -1,5 +1,5 @@
 import { ChevronDown, Link2, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { HaBinding, HaDevice, HaEntityState } from "../../types/ha";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -44,6 +44,13 @@ export function HaBindingDialog({
 }: HaBindingDialogProps) {
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    }
+  }, [open]);
 
   const filteredDevices = devices.filter((device) =>
     deviceName(device).toLowerCase().includes(query.toLowerCase()),
@@ -51,13 +58,21 @@ export function HaBindingDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
-      <DialogContent className="flex h-[76vh] w-[620px] max-w-[calc(100vw-40px)] flex-col gap-0 overflow-hidden p-0">
+      <DialogContent
+        className="flex h-[76vh] w-[620px] max-w-[calc(100vw-40px)] flex-col gap-0 overflow-hidden p-0"
+        onPointerDownCapture={(event) => event.stopPropagation()}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          window.requestAnimationFrame(() => searchInputRef.current?.focus());
+        }}
+      >
         <DialogHeader className="border-b border-border px-4 py-3">
           <DialogTitle>绑定 Home Assistant 实体</DialogTitle>
           <DialogDescription>选择设备，或展开设备绑定单个实体。</DialogDescription>
         </DialogHeader>
         <div className="flex min-w-0 items-center gap-2 border-b border-border p-3">
           <Input
+            ref={searchInputRef}
             className="min-w-0 flex-1"
             value={query}
             placeholder="搜索设备"
