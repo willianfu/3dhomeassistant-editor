@@ -72,6 +72,14 @@ import { resolveSelectableObject } from "./selectable-object";
 import { disposeObjectTree } from "./three-dispose";
 import { getViewControlMode } from "./view-controls";
 import { isVerticalWallLikeBox } from "./wall-visibility";
+import {
+  createRainLineEffect,
+  createWindLineEffect,
+  updateRainLineEffect,
+  updateWindLineEffect,
+  type RainLineEffect,
+  type WindLineEffect,
+} from "./weather-effects";
 
 export type ThreeEditorOptions = {
   onSelectionChange?: (uuids: string[]) => void;
@@ -103,26 +111,6 @@ type HaPanelMarker = {
   group: THREE.Group;
   helpers: THREE.BoxHelper[];
   objectIds: string[];
-};
-
-type WeatherLineEffect = {
-  object: THREE.LineSegments<THREE.BufferGeometry, THREE.ShaderMaterial>;
-  positions: Float32Array;
-  count: number;
-  kind: "rain" | "wind";
-  speed: number;
-  drift: number;
-  length: number;
-  travelOffset: number;
-  driftOffset: number;
-  bounds: {
-    minX: number;
-    maxX: number;
-    minY: number;
-    maxY: number;
-    minZ: number;
-    maxZ: number;
-  };
 };
 
 type WeatherCloud = {
@@ -215,8 +203,8 @@ export class ThreeEditor {
   private wallOriginalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private weatherConfig: WeatherConfig = defaultWeather;
   private weatherGroup = new THREE.Group();
-  private weatherRain: WeatherLineEffect | null = null;
-  private weatherWind: WeatherLineEffect | null = null;
+  private weatherRain: RainLineEffect | null = null;
+  private weatherWind: WindLineEffect | null = null;
   private weatherClouds: WeatherCloud[] = [];
   private weatherLightningLight: THREE.PointLight | null = null;
   private weatherLightningBolt: THREE.Mesh<THREE.TubeGeometry, THREE.MeshBasicMaterial> | null =
@@ -1982,8 +1970,16 @@ export class ThreeEditor {
       this.addSunnyGlow();
     }
     if (preset.rain.count > 0) {
-      this.weatherRain = this.createLineWeatherEffect({
-        kind: "rain",
+      const bounds = this.getWeatherBounds();
+      this.weatherRain = createRainLineEffect({
+        bounds: {
+          minX: bounds.minX,
+          maxX: bounds.maxX,
+          minY: bounds.minY,
+          maxY: resolveWeatherRainTop(bounds.modelTop, bounds.skyPadding),
+          minZ: bounds.minZ,
+          maxZ: bounds.maxZ,
+        },
         count: resolveWeatherRainParticleCount(
           preset.mode,
           preset.rain.count,
@@ -2001,14 +1997,21 @@ export class ThreeEditor {
       this.weatherGroup.add(this.weatherRain.object);
     }
     if (preset.wind.count > 0) {
-      this.weatherWind = this.createLineWeatherEffect({
-        kind: "wind",
+      const bounds = this.getWeatherBounds();
+      this.weatherWind = createWindLineEffect({
+        bounds: {
+          minX: bounds.minX,
+          maxX: bounds.maxX,
+          minY: bounds.minY,
+          maxY: bounds.maxY,
+          minZ: bounds.minZ,
+          maxZ: bounds.maxZ,
+        },
         count: resolveWeatherParticleCount(preset.wind.count, sceneSpan, 4),
         speed: preset.wind.speed * weatherScale,
-        drift: 0,
         opacity: preset.wind.opacity,
         color: 0xd7f3ff,
-        length: 1.8 * weatherScale,
+        length: 5.8 * weatherScale,
       });
       this.weatherGroup.add(this.weatherWind.object);
     }
@@ -2105,138 +2108,6 @@ export class ThreeEditor {
     if (ratio >= 1) {
       this.previewCameraTransition = null;
     }
-  }
-
-  private createLineWeatherEffect({
-    kind,
-    count,
-    speed,
-    drift,
-    opacity,
-    color,
-    length,
-  }: {
-    kind: "rain" | "wind";
-    count: number;
-    speed: number;
-    drift: number;
-    opacity: number;
-    color: number;
-    length: number;
-  }): WeatherLineEffect {
-    const weatherBounds = this.getWeatherBounds();
-    const bounds = {
-      minX: weatherBounds.minX,
-      maxX: weatherBounds.maxX,
-      minY: weatherBounds.minY,
-      maxY:
-        kind === "rain"
-          ? resolveWeatherRainTop(weatherBounds.modelTop, weatherBounds.skyPadding)
-          : weatherBounds.maxY,
-      minZ: weatherBounds.minZ,
-      maxZ: weatherBounds.maxZ,
-    };
-    const positions = new Float32Array(count * 6);
-    const segmentStarts = new Float32Array(count * 6);
-    const segmentOffsets = new Float32Array(count * 6);
-    for (let index = 0; index < count; index += 1) {
-      const offset = index * 6;
-      const x = THREE.MathUtils.lerp(bounds.minX, bounds.maxX, Math.random());
-      const y = THREE.MathUtils.lerp(bounds.minY, bounds.maxY, Math.random());
-      const z = THREE.MathUtils.lerp(bounds.minZ, bounds.maxZ, Math.random());
-      const endOffsetX = kind === "rain" ? drift * 8 : length;
-      const endOffsetY = kind === "rain" ? length : 0.05;
-      const endOffsetZ = kind === "rain" ? 0 : 0.08;
-      positions[offset] = x;
-      positions[offset + 1] = y;
-      positions[offset + 2] = z;
-      positions[offset + 3] = x + endOffsetX;
-      positions[offset + 4] = y + endOffsetY;
-      positions[offset + 5] = z + endOffsetZ;
-      segmentStarts.set([x, y, z, x, y, z], offset);
-      segmentOffsets.set([0, 0, 0, endOffsetX, endOffsetY, endOffsetZ], offset);
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("aSegmentStart", new THREE.BufferAttribute(segmentStarts, 3));
-    geometry.setAttribute("aSegmentOffset", new THREE.BufferAttribute(segmentOffsets, 3));
-    const material = this.createWeatherLineMaterial(kind, color, opacity, bounds);
-    const object = new THREE.LineSegments(geometry, material);
-    object.frustumCulled = false;
-    object.name = kind === "rain" ? "weather rain" : "weather wind";
-    return {
-      object,
-      positions,
-      count,
-      kind,
-      speed,
-      drift,
-      length,
-      travelOffset: 0,
-      driftOffset: 0,
-      bounds,
-    };
-  }
-
-  private createWeatherLineMaterial(
-    kind: "rain" | "wind",
-    color: number,
-    opacity: number,
-    bounds: WeatherLineEffect["bounds"],
-  ) {
-    const wrapVertex =
-      kind === "rain"
-        ? `
-          movedStart.x = wrapValue(movedStart.x + uDriftOffset, uMinX, uMaxX);
-          movedStart.y = wrapValue(movedStart.y - uTravelOffset, uMinY, uMaxY);
-        `
-        : `
-          movedStart.x = wrapValue(movedStart.x + uTravelOffset, uMinX, uMaxX);
-        `;
-    return new THREE.ShaderMaterial({
-      uniforms: {
-        uColor: { value: new THREE.Color(color) },
-        uOpacity: { value: opacity },
-        uTravelOffset: { value: 0 },
-        uDriftOffset: { value: 0 },
-        uMinX: { value: bounds.minX },
-        uMaxX: { value: bounds.maxX },
-        uMinY: { value: bounds.minY },
-        uMaxY: { value: bounds.maxY },
-      },
-      vertexShader: `
-        attribute vec3 aSegmentStart;
-        attribute vec3 aSegmentOffset;
-        uniform float uTravelOffset;
-        uniform float uDriftOffset;
-        uniform float uMinX;
-        uniform float uMaxX;
-        uniform float uMinY;
-        uniform float uMaxY;
-
-        float wrapValue(float value, float minValue, float maxValue) {
-          float rangeValue = max(maxValue - minValue, 0.0001);
-          return minValue + mod(value - minValue, rangeValue);
-        }
-
-        void main() {
-          vec3 movedStart = aSegmentStart;
-          ${wrapVertex}
-          vec3 transformed = movedStart + aSegmentOffset;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 uColor;
-        uniform float uOpacity;
-
-        void main() {
-          gl_FragColor = vec4(uColor, uOpacity);
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-    });
   }
 
   private addWeatherClouds(
@@ -2509,8 +2380,12 @@ export class ThreeEditor {
     ) {
       return;
     }
-    this.updateLineWeatherEffect(this.weatherRain, delta);
-    this.updateLineWeatherEffect(this.weatherWind, delta);
+    if (this.weatherRain) {
+      updateRainLineEffect(this.weatherRain, delta, now * 0.001);
+    }
+    if (this.weatherWind) {
+      updateWindLineEffect(this.weatherWind, delta);
+    }
     for (const cloud of this.weatherClouds) {
       cloud.sprite.position.x += cloud.speed * delta;
       if (cloud.sprite.position.x > cloud.maxX) {
@@ -2523,22 +2398,6 @@ export class ThreeEditor {
       }
     }
     this.updateLightning(delta);
-  }
-
-  private updateLineWeatherEffect(effect: WeatherLineEffect | null, delta: number) {
-    if (!effect) {
-      return;
-    }
-    const xRange = Math.max(effect.bounds.maxX - effect.bounds.minX, 0.0001);
-    const yRange = Math.max(effect.bounds.maxY - effect.bounds.minY, 0.0001);
-    if (effect.kind === "rain") {
-      effect.travelOffset = (effect.travelOffset + effect.speed * delta) % yRange;
-      effect.driftOffset = (effect.driftOffset + effect.drift * delta) % xRange;
-      effect.object.material.uniforms.uDriftOffset.value = effect.driftOffset;
-    } else {
-      effect.travelOffset = (effect.travelOffset + effect.speed * delta) % xRange;
-    }
-    effect.object.material.uniforms.uTravelOffset.value = effect.travelOffset;
   }
 
   private updateLightning(delta: number) {
