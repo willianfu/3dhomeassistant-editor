@@ -1,4 +1,4 @@
-import { Boxes, Lightbulb, Link2, Trash2, X } from "lucide-react";
+import { Boxes, Copy, DoorOpen, Lightbulb, Link2, Trash2, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { removeHaBinding } from "../../lib/ha-bindings";
 import { defaultLightCapabilityConfig } from "../../lib/ha-capabilities/light";
@@ -9,12 +9,17 @@ import { cn } from "../../lib/utils";
 import type {
   EnvironmentConfig,
   ObjectMetadata,
+  PerformanceConfig,
+  RenderBackend,
+  RenderQuality,
   SelectionTransformInfo,
   Vector3Values,
 } from "../../types/editor";
 import type {
   HaBinding,
   HaConnectionStatus,
+  HaCoverCapabilityConfig,
+  HaCoverOpenMode,
   HaEntityState,
   HaLightCapabilityConfig,
   HaManualDeviceType,
@@ -53,6 +58,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 type RightInspectorProps = {
   environment: EnvironmentConfig;
+  performance: PerformanceConfig;
   haConfig: HaRuntimeConfig;
   haStatus: HaConnectionStatus;
   haStatusMessage: string;
@@ -61,6 +67,7 @@ type RightInspectorProps = {
   selectionBindings: HaBinding[];
   selectedCount: number;
   onEnvironmentChange: (config: EnvironmentConfig) => void;
+  onPerformanceChange: (config: PerformanceConfig) => void;
   onHaConfigChange: (config: HaRuntimeConfig) => void;
   onRetryHaConnection: () => void;
   onPositionChange: (position: Vector3Values) => void;
@@ -70,6 +77,7 @@ type RightInspectorProps = {
   onUniformScale: (multiplier: number) => void;
   onOpenBindingDialog: () => void;
   onBindingsChange: (bindings: HaBinding[]) => void;
+  onCoverCapabilityChange: (config: HaCoverCapabilityConfig) => void;
   onLightCapabilityChange: (config: HaLightCapabilityConfig) => void;
   onManualDeviceTypeChange: (deviceType: HaManualDeviceType) => void;
   haStates: Record<string, HaEntityState>;
@@ -195,6 +203,36 @@ function InfoRow({ label, value }: { label: string; value: ReactNode }) {
       <span className="min-w-0 truncate text-right text-foreground" title={String(value)}>
         {value}
       </span>
+    </div>
+  );
+}
+
+function CopyableInfoRow({ label, value }: { label: string; value: string }) {
+  const copyValue = async () => {
+    if (!value || value === "-") {
+      return;
+    }
+    await navigator.clipboard?.writeText(value);
+  };
+
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-2 text-xs">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <div className="flex min-w-0 items-center gap-1">
+        <span className="min-w-0 truncate text-right text-foreground" title={value}>
+          {value}
+        </span>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="size-6 shrink-0"
+          disabled={!value || value === "-"}
+          onClick={copyValue}
+        >
+          <Copy data-icon="icon" />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -810,8 +848,139 @@ function LightCapabilityPanel({
   );
 }
 
+const COVER_OPEN_MODE_OPTIONS: Array<{ value: HaCoverOpenMode; label: string }> = [
+  { value: "symmetrical", label: "对称开" },
+  { value: "left", label: "往左开" },
+  { value: "right", label: "往右开" },
+  { value: "down", label: "往下开" },
+  { value: "up", label: "往上开" },
+];
+
+function CoverCapabilityPanel({
+  bindings,
+  config,
+  manualDeviceType,
+  onChange,
+}: {
+  bindings: HaBinding[];
+  config: HaCoverCapabilityConfig | null;
+  manualDeviceType: HaManualDeviceType;
+  onChange: (config: HaCoverCapabilityConfig) => void;
+}) {
+  const entityIds = bindings.flatMap((binding) =>
+    binding.type === "entity" ? [binding.entityId] : binding.entityIds,
+  );
+  const hasCoverEntity = entityIds.some((entityId) => getEntityDomain(entityId) === "cover");
+  const current: HaCoverCapabilityConfig = {
+    enabled: true,
+    openMode: "symmetrical",
+    ...(config ?? {}),
+  };
+
+  if (!hasCoverEntity && manualDeviceType !== "cover" && !config?.enabled) {
+    return null;
+  }
+
+  const update = (patch: Partial<HaCoverCapabilityConfig>) =>
+    onChange({ ...current, ...patch });
+
+  return (
+    <Section title="窗帘动画" description="根据 HA 开合比例模拟模型开合">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <DoorOpen className="shrink-0 text-primary" />
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            0% 关闭，100% 完全打开
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Switch
+            checked={current.enabled}
+            onCheckedChange={(enabled) => update({ enabled })}
+          />
+          <Label className="text-xs">启用</Label>
+        </div>
+      </div>
+      <div className="grid gap-1.5">
+        <Label>开合方式</Label>
+        <Select
+          value={current.openMode}
+          onValueChange={(openMode) => update({ openMode: openMode as HaCoverOpenMode })}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {COVER_OPEN_MODE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </div>
+      <NumberField
+        label="收起保留距离 m"
+        min={0.01}
+        step={0.01}
+        value={current.closedVisibleDistance ?? 0.1}
+        onChange={(closedVisibleDistance) =>
+          update({ closedVisibleDistance: Math.max(closedVisibleDistance, 0.01) })
+        }
+      />
+      <NumberField
+        label="100%打开距离 m"
+        min={0}
+        step={0.01}
+        value={current.openTravelDistance ?? 1}
+        onChange={(openTravelDistance) =>
+          update({ openTravelDistance: Math.max(openTravelDistance, 0) })
+        }
+      />
+      <NumberField
+        label="开合速度 m/s"
+        min={0.1}
+        step={0.1}
+        value={current.animationSpeedMetersPerSecond ?? 0.5}
+        onChange={(animationSpeedMetersPerSecond) =>
+          update({
+            animationSpeedMetersPerSecond:
+              Math.round(Math.max(animationSpeedMetersPerSecond, 0.1) * 10) / 10,
+          })
+        }
+      />
+      {current.openMode === "symmetrical" ? (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="grid gap-1.5">
+            <Label>左帘对象ID</Label>
+            <Input
+              value={current.leftObjectId ?? ""}
+              placeholder="objectId"
+              onChange={(event) => update({ leftObjectId: event.target.value.trim() })}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>右帘对象ID</Label>
+            <Input
+              value={current.rightObjectId ?? ""}
+              placeholder="objectId"
+              onChange={(event) => update({ rightObjectId: event.target.value.trim() })}
+            />
+          </div>
+        </div>
+      ) : null}
+      <div className="text-[10px] leading-4 text-muted-foreground">
+        对称开可填写左右帘对象ID；其他方式默认控制当前选中模型。
+      </div>
+    </Section>
+  );
+}
+
 export function RightInspector({
   environment,
+  performance,
   haConfig,
   haStatus,
   haStatusMessage,
@@ -820,6 +989,7 @@ export function RightInspector({
   selectionBindings,
   selectedCount,
   onEnvironmentChange,
+  onPerformanceChange,
   onHaConfigChange,
   onRetryHaConnection,
   onPositionChange,
@@ -829,6 +999,7 @@ export function RightInspector({
   onUniformScale,
   onOpenBindingDialog,
   onBindingsChange,
+  onCoverCapabilityChange,
   onLightCapabilityChange,
   onManualDeviceTypeChange,
   haStates,
@@ -837,6 +1008,9 @@ export function RightInspector({
 }: RightInspectorProps) {
   const updateEnvironment = (patch: Partial<EnvironmentConfig>) => {
     onEnvironmentChange({ ...environment, ...patch });
+  };
+  const updatePerformance = (patch: Partial<PerformanceConfig>) => {
+    onPerformanceChange({ ...performance, ...patch });
   };
 
   return (
@@ -854,6 +1028,74 @@ export function RightInspector({
           <ScrollArea className="h-full pr-3">
             <div className="grid gap-3">
               <Accordion type="multiple" className="grid gap-3">
+                <AccordionItem value="performance" className="rounded-md border border-border bg-card px-3">
+                  <AccordionTrigger>性能设置</AccordionTrigger>
+                  <AccordionContent className="grid gap-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="grid gap-1">
+                        <Label>WebGPU 渲染</Label>
+                        <div className="text-xs text-muted-foreground">
+                          开启后优先使用 WebGPU，浏览器不支持时自动回退 WebGL。刷新后生效。
+                        </div>
+                      </div>
+                      <Switch
+                        checked={performance.renderBackend === "webgpu"}
+                        onCheckedChange={(checked) =>
+                          updatePerformance({
+                            renderBackend: checked ? "webgpu" : "webgl",
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label>渲染器</Label>
+                      <Select
+                        value={performance.renderBackend}
+                        onValueChange={(renderBackend) =>
+                          updatePerformance({
+                            renderBackend: renderBackend as RenderBackend,
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="webgl">WebGL</SelectItem>
+                            <SelectItem value="webgpu">WebGPU</SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label>画面质量</Label>
+                      <Select
+                        value={performance.quality}
+                        onValueChange={(quality) =>
+                          updatePerformance({
+                            quality: quality as RenderQuality,
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="low">低质量</SelectItem>
+                            <SelectItem value="medium">中等质量</SelectItem>
+                            <SelectItem value="high">高质量</SelectItem>
+                            <SelectItem value="ultra">超高质量</SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <div className="text-xs text-muted-foreground">
+                        高质量保持当前默认效果；低质量降低像素比并关闭阴影，超高质量增强阴影细节。
+                      </div>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
                 <AccordionItem value="ha-config" className="rounded-md border border-border bg-card px-3">
                   <AccordionTrigger>Home Assistant</AccordionTrigger>
                   <AccordionContent className="grid gap-3">
@@ -1022,12 +1264,12 @@ export function RightInspector({
               <div className="grid gap-4">
                 <Accordion type="multiple" className="grid gap-3">
                   <AccordionPanel value="basic" title="基础信息">
+                    <CopyableInfoRow label="对象ID" value={metadata.objectId ?? "-"} />
                     <InfoRow label="名称" value={metadata.name} />
                     <InfoRow label="类型" value={metadata.type} />
                     <InfoRow label="父级" value={metadata.parentName ?? "-"} />
                     <InfoRow label="子节点" value={metadata.childCount} />
                     <InfoRow label="网格数" value={metadata.meshCount} />
-                    <InfoRow label="对象ID" value={metadata.objectId ?? "-"} />
                     <InfoRow label="绑定组" value={metadata.bindingGroupId ?? "-"} />
                     <InfoRow label="HA实体" value={metadata.entityId ?? "-"} />
                     <InfoRow label="UUID" value={metadata.id} />
@@ -1068,6 +1310,12 @@ export function RightInspector({
                 <DeviceTypeSelect
                   value={metadata.deviceType}
                   onChange={onManualDeviceTypeChange}
+                />
+                <CoverCapabilityPanel
+                  bindings={metadata.bindings}
+                  config={metadata.coverCapability}
+                  manualDeviceType={metadata.deviceType}
+                  onChange={onCoverCapabilityChange}
                 />
                 <LightCapabilityPanel
                   bindings={metadata.bindings}

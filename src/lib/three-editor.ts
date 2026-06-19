@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
@@ -9,7 +10,10 @@ import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUnifo
 import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import type {
   EnvironmentConfig,
+  PerformanceConfig,
   PreviewCameraMode,
+  RenderBackend,
+  RenderQuality,
   Vector3Values,
   ViewMode,
 } from "../types/editor";
@@ -39,11 +43,12 @@ import {
 } from "./weather-presets";
 import type {
   HaBinding,
+  HaCoverCapabilityConfig,
   HaEntityState,
   HaLightCapabilityConfig,
   HaManualDeviceType,
 } from "../types/ha";
-import { defaultEnvironment } from "../types/editor";
+import { defaultEnvironment, defaultPerformance } from "../types/editor";
 import { EditorHistory, type EditorHistoryState } from "./editor-history";
 import {
   applyEditorLocalConfig,
@@ -52,26 +57,43 @@ import {
 } from "./editor-local-config";
 import type { HaRuntimeConfig } from "./ha-config";
 import { FpsMeter } from "./fps-meter";
+import { compressGlbWithDraco } from "./glb-compression";
 import {
   resolveLightCapability,
   resolveLightRenderIntensity,
 } from "./ha-capabilities/light";
+import {
+  defaultCoverCapabilityConfig,
+  resolveCoverAnimationStepPercent,
+  resolveCoverAnimationTransform,
+  resolveCoverPositionPercent,
+  resolveSymmetricalCoverTargetMode,
+} from "./ha-capabilities/cover";
 import { getBoundEntityIds } from "./ha-bindings";
 import { groupObjectsPreservingWorldTransform } from "./model-grouping";
 import {
+  assignFreshModelObjectIds,
   ensureModelObjectIds,
+  getCoverCapabilityConfig,
+  getModelObjectId,
   getLightCapabilityConfig,
   setManualDeviceType,
   getObjectBindings,
+  setCoverCapabilityConfig,
   setLightCapabilityConfig,
   setObjectBindings,
+  syncAllCoverTargetBindings,
+  syncCoverTargetBindings,
 } from "./model-identity";
 import { computeOrthoFrustum } from "./ortho-frustum";
+import { removeOwnedElement } from "./owned-dom";
 import { getResizeRatios, scalePointAroundCenter } from "./selection-transform";
 import { resolveSelectableObject } from "./selectable-object";
 import { disposeObjectTree } from "./three-dispose";
 import { getViewControlMode } from "./view-controls";
 import { isVerticalWallLikeBox } from "./wall-visibility";
+import { getRenderQualityProfile } from "./render-quality";
+import { withTimeout } from "./with-timeout";
 import {
   createRainLineEffect,
   createWindLineEffect,
@@ -82,7 +104,10 @@ import {
 } from "./weather-effects";
 
 export type ThreeEditorOptions = {
+  renderBackend?: RenderBackend;
+  quality?: RenderQuality;
   onSelectionChange?: (uuids: string[]) => void;
+  onObjectContextMenu?: (event: { clientX: number; clientY: number; uuid: string }) => void;
   onModelChange?: () => void;
   onHistoryChange?: (state: EditorHistoryState) => void;
   onLoadProgress?: (progress: number) => void;
@@ -105,6 +130,20 @@ type HaLightRig = {
   type: HaLightCapabilityConfig["lightType"];
   group: THREE.Group;
   light: HaLightObject;
+};
+
+type HaCoverAnimation = {
+  object: THREE.Object3D;
+  config: HaCoverCapabilityConfig;
+  currentPositionPercent: number;
+  targetPositionPercent: number;
+  restPosition: THREE.Vector3;
+  restScale: THREE.Vector3;
+  size: THREE.Vector3;
+  localBounds: {
+    min: THREE.Vector3;
+    max: THREE.Vector3;
+  };
 };
 
 type HaPanelMarker = {
@@ -170,7 +209,8 @@ function colorTemperatureToColor(kelvin: number) {
 export class ThreeEditor {
   private readonly container: HTMLElement;
   private readonly options: ThreeEditorOptions;
-  private renderer: THREE.WebGLRenderer | null = null;
+  private renderer: THREE.WebGLRenderer | WebGPURenderer | null = null;
+  private activeRenderBackend: RenderBackend = "webgl";
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera | null = null;
   private orthoCamera: THREE.OrthographicCamera | null = null;
@@ -199,6 +239,8 @@ export class ThreeEditor {
   private objectMap = new Map<string, THREE.Object3D>();
   private originalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private haLights = new Map<string, HaLightRig>();
+  private haCoverAnimations = new Map<string, HaCoverAnimation>();
+  private haCoverLastFrameTime = 0;
   private haPanelMarkers = new Map<string, HaPanelMarker>();
   private wallOriginalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private weatherConfig: WeatherConfig = defaultWeather;
@@ -223,6 +265,7 @@ export class ThreeEditor {
   private previewCameraMode: PreviewCameraMode = "manual";
   private previewCameraTransition: PreviewCameraTransition | null = null;
   private environmentConfig: EnvironmentConfig = defaultEnvironment;
+  private performanceConfig: PerformanceConfig = defaultPerformance;
   private dragStart: { x: number; y: number } | null = null;
   private pointerDownState: {
     x: number;
@@ -237,18 +280,20 @@ export class ThreeEditor {
   constructor(container: HTMLElement, options: ThreeEditorOptions = {}) {
     this.container = container;
     this.options = options;
+    this.performanceConfig = {
+      renderBackend: options.renderBackend ?? defaultPerformance.renderBackend,
+      quality: options.quality ?? defaultPerformance.quality,
+    };
     this.dracoLoader = new DRACOLoader();
     this.dracoLoader.setDecoderPath("/draco/");
     this.loader = new GLTFLoader();
     this.loader.setDRACOLoader(this.dracoLoader);
   }
 
-  init() {
+  async init() {
     RectAreaLightUniformsLib.init();
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer = await this.createRenderer(this.performanceConfig.renderBackend);
+    this.applyRenderQuality();
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = defaultEnvironment.exposure;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -293,13 +338,12 @@ export class ThreeEditor {
       defaultEnvironment.directionalPosition.y,
       defaultEnvironment.directionalPosition.z,
     );
-    this.directional.castShadow = true;
-    this.directional.shadow.mapSize.set(2048, 2048);
     this.directional.shadow.camera.left = -12;
     this.directional.shadow.camera.right = 12;
     this.directional.shadow.camera.top = 12;
     this.directional.shadow.camera.bottom = -12;
     this.directional.shadow.bias = -0.0001;
+    this.applyRenderQuality();
     this.scene.add(this.ambient, this.directional);
     this.weatherGroup.name = "weather simulation";
     this.scene.add(this.weatherGroup);
@@ -317,6 +361,61 @@ export class ThreeEditor {
     this.renderer.domElement.addEventListener("contextmenu", this.handleContextMenu);
     window.addEventListener("pointerup", this.handlePointerUp);
     this.animate();
+  }
+
+  private async createRenderer(renderBackend: RenderBackend) {
+    if (renderBackend === "webgpu" && "gpu" in navigator) {
+      let renderer: WebGPURenderer | null = null;
+      try {
+        renderer = new WebGPURenderer({ antialias: true, alpha: true });
+        await withTimeout(renderer.init(), 3000, "WebGPU initialization timed out.");
+        this.activeRenderBackend = "webgpu";
+        return renderer;
+      } catch {
+        renderer?.dispose();
+        this.activeRenderBackend = "webgl";
+      }
+    }
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.activeRenderBackend = "webgl";
+    return renderer;
+  }
+
+  setPerformanceConfig(config: PerformanceConfig) {
+    this.performanceConfig = {
+      renderBackend:
+        config.renderBackend === "webgpu" || config.renderBackend === "webgl"
+          ? config.renderBackend
+          : defaultPerformance.renderBackend,
+      quality: config.quality ?? defaultPerformance.quality,
+    };
+    this.applyRenderQuality();
+  }
+
+  private applyRenderQuality() {
+    if (!this.renderer) {
+      return;
+    }
+    const profile = getRenderQualityProfile(this.performanceConfig.quality);
+    this.renderer.setPixelRatio(
+      Math.min(window.devicePixelRatio || 1, profile.pixelRatioCap),
+    );
+    this.renderer.shadowMap.enabled = profile.shadowEnabled;
+    this.renderer.shadowMap.type =
+      profile.shadowType === "soft" ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
+    this.directional.castShadow = profile.shadowEnabled;
+    this.directional.shadow.radius = profile.shadowRadius;
+    const mapSizeChanged =
+      this.directional.shadow.mapSize.x !== profile.shadowMapSize ||
+      this.directional.shadow.mapSize.y !== profile.shadowMapSize;
+    this.directional.shadow.mapSize.set(profile.shadowMapSize, profile.shadowMapSize);
+    if (this.directional.shadow.map) {
+      if (mapSizeChanged || !profile.shadowEnabled) {
+        this.directional.shadow.map.dispose();
+        this.directional.shadow.map = null;
+      }
+    }
+    this.directional.shadow.needsUpdate = true;
   }
 
   dispose() {
@@ -360,7 +459,7 @@ export class ThreeEditor {
     this.transformControls?.detach();
     this.transformControls?.dispose();
     this.dracoLoader.dispose();
-    this.container.replaceChildren();
+    removeOwnedElement(this.container, this.renderer?.domElement ?? null);
     this.objectMap.clear();
   }
 
@@ -500,7 +599,9 @@ export class ThreeEditor {
     if (this.selectedIds.size === 0 || !this.modelRoot) {
       return false;
     }
-    const before = this.captureSnapshots(this.getSelectedObjects());
+    const selectedObjects = this.getSelectedObjects();
+    this.clearHaCoverAnimationsForObjects(selectedObjects);
+    const before = this.captureSnapshots(selectedObjects);
     let deleted = false;
     const objects = [...this.selectedIds]
       .map((id) => this.objectMap.get(id))
@@ -508,6 +609,7 @@ export class ThreeEditor {
       .filter((object) => object !== this.modelRoot && Boolean(object.parent));
 
     for (const object of objects) {
+      this.clearHaCoverAnimationForObject(object);
       this.clearHaLightForObject(object.uuid);
       object.parent?.remove(object);
       disposeObjectTree(object);
@@ -528,11 +630,67 @@ export class ThreeEditor {
     return true;
   }
 
+  duplicateSelected() {
+    if (this.selectedIds.size !== 1 || !this.modelRoot) {
+      return false;
+    }
+    const [selectedId] = [...this.selectedIds];
+    const source = this.objectMap.get(selectedId);
+    if (!source || source === this.modelRoot || !source.parent) {
+      return false;
+    }
+    this.clearHaCoverAnimationForObject(source);
+    const parent = source.parent;
+    const clone = source.clone(true);
+    clone.name = source.name ? `${source.name} 副本` : "模型副本";
+    assignFreshModelObjectIds(
+      clone,
+      [...this.objectMap.values()].map((object) => getModelObjectId(object)),
+    );
+    const beforeSelectedIds = [...this.selectedIds];
+    parent.add(clone);
+    const box = new THREE.Box3().setFromObject(source);
+    const size = box.getSize(new THREE.Vector3());
+    clone.position.x += Math.max(size.x * 0.18, 0.2);
+    clone.position.z += Math.max(size.z * 0.18, 0.2);
+    this.prepareModel(clone);
+    this.rebuildObjectMap();
+    this.selectedIds = new Set([clone.uuid]);
+    this.updateSelectionBox();
+    this.updateTransformControls();
+    this.options.onSelectionChange?.([clone.uuid]);
+    this.options.onModelChange?.();
+    this.history.push({
+      label: "复制模型",
+      undo: () => {
+        clone.parent?.remove(clone);
+        this.rebuildObjectMap();
+        this.selectedIds = new Set(beforeSelectedIds.filter((id) => this.objectMap.has(id)));
+        this.updateSelectionBox();
+        this.updateTransformControls();
+        this.options.onSelectionChange?.([...this.selectedIds]);
+        this.options.onModelChange?.();
+      },
+      redo: () => {
+        parent.add(clone);
+        this.rebuildObjectMap();
+        this.selectedIds = new Set([clone.uuid]);
+        this.updateSelectionBox();
+        this.updateTransformControls();
+        this.options.onSelectionChange?.([clone.uuid]);
+        this.options.onModelChange?.();
+      },
+    });
+    this.options.onHistoryChange?.(this.history.getState());
+    return true;
+  }
+
   updatePosition(uuid: string, position: Vector3Values) {
     const object = this.objectMap.get(uuid);
     if (!object) {
       return;
     }
+    this.clearHaCoverAnimationForObject(object);
     const before = this.captureSnapshots([object]);
     object.position.set(position.x, position.y, position.z);
     this.updateSelectionBox();
@@ -546,6 +704,7 @@ export class ThreeEditor {
     if (objects.length !== 1) {
       return;
     }
+    this.clearHaCoverAnimationsForObjects(objects);
     const before = this.captureSnapshots(objects);
     objects[0].scale.set(
       Math.max(scale.x, 0.001),
@@ -560,6 +719,7 @@ export class ThreeEditor {
 
   resizeSelection(targetSize: Vector3Values) {
     const objects = this.getSelectedObjects();
+    this.clearHaCoverAnimationsForObjects(objects);
     const box = this.getSelectionBox(objects);
     if (!box) {
       return;
@@ -581,6 +741,7 @@ export class ThreeEditor {
 
   updateSelectionCenter(targetCenter: Vector3Values) {
     const objects = this.getSelectedObjects();
+    this.clearHaCoverAnimationsForObjects(objects);
     const box = this.getSelectionBox(objects);
     if (!box) {
       return;
@@ -610,6 +771,7 @@ export class ThreeEditor {
       return;
     }
     const objects = this.getSelectedObjects();
+    this.clearHaCoverAnimationsForObjects(objects);
     const box = this.getSelectionBox(objects);
     if (!box) {
       return;
@@ -715,11 +877,12 @@ export class ThreeEditor {
     environment: EnvironmentConfig,
     weather: WeatherConfig,
     ha: HaRuntimeConfig,
+    performance: PerformanceConfig,
   ) {
     if (!this.modelRoot) {
       return null;
     }
-    return createEditorLocalConfig(this.modelRoot, environment, weather, ha);
+    return createEditorLocalConfig(this.modelRoot, environment, weather, ha, performance);
   }
 
   applyLocalConfig(config: EditorLocalConfig | null) {
@@ -727,6 +890,7 @@ export class ThreeEditor {
       return;
     }
     applyEditorLocalConfig(this.modelRoot, config);
+    syncAllCoverTargetBindings(this.modelRoot);
     this.rebuildObjectMap();
     this.options.onModelChange?.();
   }
@@ -756,6 +920,41 @@ export class ThreeEditor {
     return null;
   }
 
+  getCoverCapabilityForObjects(objectIds: string[]) {
+    for (const objectId of objectIds) {
+      const object = this.objectMap.get(objectId);
+      if (!object) {
+        continue;
+      }
+      const config = getCoverCapabilityConfig(object);
+      if (config) {
+        return config;
+      }
+    }
+    return null;
+  }
+
+  updateCoverCapabilityForSelection(config: HaCoverCapabilityConfig) {
+    const objects = this.getSelectedObjects();
+    if (objects.length === 0) {
+      return;
+    }
+    for (const object of objects) {
+      this.clearHaCoverAnimationForObject(object);
+      setCoverCapabilityConfig(object, config);
+      if (this.modelRoot) {
+        syncCoverTargetBindings(this.modelRoot, object, config);
+      }
+    }
+    this.history.push({
+      label: "配置窗帘动画",
+      undo: () => undefined,
+      redo: () => undefined,
+    });
+    this.options.onHistoryChange?.(this.history.getState());
+    this.options.onModelChange?.();
+  }
+
   updateLightCapabilityForSelection(config: HaLightCapabilityConfig) {
     const objects = this.getSelectedObjects();
     if (objects.length === 0) {
@@ -780,6 +979,9 @@ export class ThreeEditor {
     }
     for (const object of objects) {
       setManualDeviceType(object, deviceType);
+      if (deviceType === "cover" && !getCoverCapabilityConfig(object)) {
+        setCoverCapabilityConfig(object, defaultCoverCapabilityConfig());
+      }
       if (deviceType === "light" && !getLightCapabilityConfig(object)) {
         setLightCapabilityConfig(object, {
           enabled: true,
@@ -809,6 +1011,10 @@ export class ThreeEditor {
     }
     for (const object of objects) {
       setObjectBindings(object, bindings);
+      const coverConfig = getCoverCapabilityConfig(object);
+      if (this.modelRoot && coverConfig) {
+        syncCoverTargetBindings(this.modelRoot, object, coverConfig);
+      }
     }
     this.history.push({
       label: "绑定 HA 实体",
@@ -824,13 +1030,22 @@ export class ThreeEditor {
       return;
     }
 
+    const activeCoverIds = new Set<string>();
     this.modelRoot.traverse((object) => {
       const bindings = getObjectBindings(object);
+      const coverConfig = getCoverCapabilityConfig(object);
       const lightConfig = getLightCapabilityConfig(object);
-      if (bindings.length === 0 && !lightConfig) {
+      if (bindings.length === 0 && !lightConfig && !coverConfig) {
         return;
       }
       const boundEntityIds = getBoundEntityIds(bindings);
+      if (coverConfig?.enabled) {
+        const targetPositionPercent = resolveCoverPositionPercent(boundEntityIds, states);
+        for (const target of this.resolveCoverAnimationTargets(object, coverConfig)) {
+          activeCoverIds.add(target.object.uuid);
+          this.ensureHaCoverAnimation(target.object, target.config, targetPositionPercent);
+        }
+      }
       const light = resolveLightCapability({
         config: lightConfig,
         entityIds: boundEntityIds,
@@ -842,6 +1057,7 @@ export class ThreeEditor {
         this.disableObjectEmission(object);
       }
     });
+    this.removeInactiveHaCoverAnimations(activeCoverIds);
   }
 
   getSelectionScreenAnchor() {
@@ -997,21 +1213,29 @@ export class ThreeEditor {
     this.updateWallTransparency();
   }
 
-  async exportGlb() {
+  async exportGlb(options: { compressed?: boolean } = {}) {
     if (!this.modelRoot) {
       throw new Error("No model loaded.");
     }
     const exporter = new GLTFExporter();
     this.restoreWallTransparency();
+    this.restoreHaCoverAnimationsForExport();
     const exportRoot = this.modelRoot.clone(true);
     this.sanitizeModelGeometry(exportRoot);
     try {
       const result = await exporter.parseAsync(exportRoot, { binary: true });
+      let arrayBuffer: ArrayBuffer;
       if (result instanceof ArrayBuffer) {
-        return new Blob([result], { type: "model/gltf-binary" });
+        arrayBuffer = result;
+      } else {
+        arrayBuffer = new TextEncoder().encode(JSON.stringify(result)).buffer;
       }
-      return new Blob([JSON.stringify(result)], { type: "model/gltf+json" });
+      const output = options.compressed
+        ? await compressGlbWithDraco(arrayBuffer)
+        : arrayBuffer;
+      return new Blob([output], { type: "model/gltf-binary" });
     } finally {
+      this.reapplyHaCoverAnimationsAfterExport();
       this.updateWallTransparency();
     }
   }
@@ -1019,6 +1243,7 @@ export class ThreeEditor {
   private clearModel() {
     this.selectObject(null);
     this.restoreWallTransparency();
+    this.clearHaCoverAnimations();
     this.clearHaLights();
     this.clearHaPanelMarkers();
     this.originalMaterials.clear();
@@ -1192,6 +1417,216 @@ export class ThreeEditor {
         mesh.userData.selectable = true;
       }
     });
+  }
+
+  private ensureHaCoverAnimation(
+    object: THREE.Object3D,
+    config: HaCoverCapabilityConfig,
+    targetPositionPercent: number,
+  ) {
+    const existing = this.haCoverAnimations.get(object.uuid);
+    if (existing) {
+      existing.config = config;
+      existing.targetPositionPercent = targetPositionPercent;
+      return existing;
+    }
+
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) {
+      return null;
+    }
+    const localObject = object.clone(true);
+    localObject.position.set(0, 0, 0);
+    localObject.updateMatrixWorld(true);
+    const localBox = new THREE.Box3().setFromObject(localObject);
+    const animation: HaCoverAnimation = {
+      object,
+      config,
+      currentPositionPercent: targetPositionPercent,
+      targetPositionPercent,
+      restPosition: object.position.clone(),
+      restScale: object.scale.clone(),
+      size: box.getSize(new THREE.Vector3()),
+      localBounds: {
+        min: localBox.min.clone(),
+        max: localBox.max.clone(),
+      },
+    };
+    this.haCoverAnimations.set(object.uuid, animation);
+    this.applyHaCoverAnimation(animation);
+    return animation;
+  }
+
+  private resolveCoverAnimationTargets(
+    object: THREE.Object3D,
+    config: HaCoverCapabilityConfig,
+  ) {
+    if (config.openMode !== "symmetrical") {
+      return [{ object, config }];
+    }
+    const leftObject = config.leftObjectId
+      ? this.findObjectByModelObjectId(config.leftObjectId)
+      : null;
+    const rightObject = config.rightObjectId
+      ? this.findObjectByModelObjectId(config.rightObjectId)
+      : null;
+    if (!leftObject && !rightObject) {
+      return [{ object, config }];
+    }
+    const targets: Array<{ object: THREE.Object3D; config: HaCoverCapabilityConfig }> = [];
+    if (leftObject) {
+      targets.push({
+        object: leftObject,
+        config: { ...config, openMode: resolveSymmetricalCoverTargetMode("left") },
+      });
+    }
+    if (rightObject) {
+      targets.push({
+        object: rightObject,
+        config: { ...config, openMode: resolveSymmetricalCoverTargetMode("right") },
+      });
+    }
+    return targets;
+  }
+
+  private findObjectByModelObjectId(objectId: string) {
+    const normalized = objectId.trim();
+    if (!normalized) {
+      return null;
+    }
+    for (const object of this.objectMap.values()) {
+      if (getModelObjectId(object) === normalized) {
+        return object;
+      }
+    }
+    return null;
+  }
+
+  private removeInactiveHaCoverAnimations(activeIds: Set<string>) {
+    for (const [uuid, animation] of this.haCoverAnimations) {
+      if (activeIds.has(uuid)) {
+        continue;
+      }
+      this.restoreHaCoverAnimation(animation);
+      this.haCoverAnimations.delete(uuid);
+    }
+  }
+
+  private restoreHaCoverAnimation(animation: HaCoverAnimation) {
+    animation.object.position.copy(animation.restPosition);
+    animation.object.scale.copy(animation.restScale);
+    animation.object.updateMatrixWorld(true);
+  }
+
+  private clearHaCoverAnimations() {
+    for (const animation of this.haCoverAnimations.values()) {
+      this.restoreHaCoverAnimation(animation);
+    }
+    this.haCoverAnimations.clear();
+  }
+
+  private clearHaCoverAnimationForObject(object: THREE.Object3D) {
+    const objectIds = new Set([object.uuid]);
+    const config = getCoverCapabilityConfig(object);
+    if (config) {
+      for (const target of this.resolveCoverAnimationTargets(object, config)) {
+        objectIds.add(target.object.uuid);
+      }
+    }
+    for (const uuid of objectIds) {
+      const animation = this.haCoverAnimations.get(uuid);
+      if (!animation) {
+        continue;
+      }
+      this.restoreHaCoverAnimation(animation);
+      this.haCoverAnimations.delete(uuid);
+    }
+  }
+
+  private clearHaCoverAnimationsForObjects(objects: THREE.Object3D[]) {
+    for (const object of objects) {
+      this.clearHaCoverAnimationForObject(object);
+    }
+  }
+
+  private restoreHaCoverAnimationsForExport() {
+    for (const animation of this.haCoverAnimations.values()) {
+      this.restoreHaCoverAnimation(animation);
+    }
+  }
+
+  private reapplyHaCoverAnimationsAfterExport() {
+    for (const animation of this.haCoverAnimations.values()) {
+      this.applyHaCoverAnimation(animation);
+    }
+  }
+
+  private applyHaCoverAnimation(animation: HaCoverAnimation) {
+    const transform = resolveCoverAnimationTransform({
+      config: animation.config,
+      positionPercent: animation.currentPositionPercent,
+      size: {
+        x: animation.size.x,
+        y: animation.size.y,
+        z: animation.size.z,
+      },
+      localBounds: {
+        min: {
+          x: animation.localBounds.min.x,
+          y: animation.localBounds.min.y,
+          z: animation.localBounds.min.z,
+        },
+        max: {
+          x: animation.localBounds.max.x,
+          y: animation.localBounds.max.y,
+          z: animation.localBounds.max.z,
+        },
+      },
+    });
+    animation.object.position.set(
+      animation.restPosition.x + transform.offset.x,
+      animation.restPosition.y + transform.offset.y,
+      animation.restPosition.z + transform.offset.z,
+    );
+    animation.object.scale.set(
+      Math.max(animation.restScale.x * transform.scale.x, 0.001),
+      Math.max(animation.restScale.y * transform.scale.y, 0.001),
+      Math.max(animation.restScale.z * transform.scale.z, 0.001),
+    );
+    animation.object.updateMatrixWorld(true);
+  }
+
+  private updateHaCoverAnimations() {
+    const now = performance.now();
+    if (this.haCoverAnimations.size === 0) {
+      this.haCoverLastFrameTime = now;
+      return;
+    }
+    const deltaSeconds =
+      this.haCoverLastFrameTime > 0
+        ? Math.min((now - this.haCoverLastFrameTime) / 1000, 0.1)
+        : 1 / 60;
+    this.haCoverLastFrameTime = now;
+    for (const animation of this.haCoverAnimations.values()) {
+      const delta = animation.targetPositionPercent - animation.currentPositionPercent;
+      const step = resolveCoverAnimationStepPercent({
+        config: animation.config,
+        size: {
+          x: animation.size.x,
+          y: animation.size.y,
+          z: animation.size.z,
+        },
+        deltaSeconds,
+      });
+      if (Math.abs(delta) <= step) {
+        animation.currentPositionPercent = animation.targetPositionPercent;
+      } else {
+        animation.currentPositionPercent += Math.sign(delta) * step;
+      }
+      this.applyHaCoverAnimation(animation);
+    }
+    this.updateSelectionBox();
+    this.updateHaPanelMarkers();
   }
 
   private sanitizeModelGeometry(root: THREE.Object3D) {
@@ -1533,8 +1968,19 @@ export class ThreeEditor {
   }
 
   private handleContextMenu = (event: MouseEvent) => {
-    if (this.viewMode !== "perspective") {
-      event.preventDefault();
+    event.preventDefault();
+    if (this.viewMode === "perspective") {
+      const target = this.pickSelectableAt(event.clientX, event.clientY);
+      if (!target || target === this.modelRoot) {
+        return;
+      }
+      this.selectObject(target.uuid);
+      this.options.onObjectContextMenu?.({
+        clientX: event.clientX,
+        clientY: event.clientY,
+        uuid: target.uuid,
+      });
+      return;
     }
   };
 
@@ -1627,6 +2073,7 @@ export class ThreeEditor {
     this.resizeIfNeeded();
     this.updatePreviewCameraTransition(now);
     this.controls?.update();
+    this.updateHaCoverAnimations();
     this.updateWeatherEffects();
     this.updateHaPanelMarkers();
     this.renderer.render(this.scene, this.getActiveCamera());
@@ -2715,10 +3162,13 @@ export class ThreeEditor {
   }
 
   private handleTransformStart = () => {
+    const objects = this.getSelectedObjects();
+    this.clearHaCoverAnimationsForObjects(objects);
+    this.updateTransformControls();
     this.transformStartPivot.copy(this.transformPivot.position);
     this.transformStartPositions.clear();
-    this.transformStartSnapshots = this.captureSnapshots(this.getSelectedObjects());
-    for (const object of this.getSelectedObjects()) {
+    this.transformStartSnapshots = this.captureSnapshots(objects);
+    for (const object of objects) {
       this.transformStartPositions.set(
         object.uuid,
         object.getWorldPosition(new THREE.Vector3()),

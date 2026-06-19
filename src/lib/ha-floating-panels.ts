@@ -33,7 +33,22 @@ export function removeMissingHaFloatingPanels(
   panels: HaFloatingPanelState[],
   existingObjectIds: Set<string>,
 ) {
-  return panels.filter((panel) =>
+  const nextPanels = panels.filter((panel) =>
     panel.objectIds.every((objectId) => existingObjectIds.has(objectId)),
   );
+  return nextPanels.length === panels.length ? panels : nextPanels;
+}
+
+export function shouldUpdateFloatingPanelAnchors({
+  now,
+  lastUpdateTime,
+  intervalMs,
+  force = false,
+}: {
+  now: number;
+  lastUpdateTime: number;
+  intervalMs: number;
+  force?: boolean;
+}) {
+  return force || lastUpdateTime === 0 || now - lastUpdateTime >= intervalMs;
 }

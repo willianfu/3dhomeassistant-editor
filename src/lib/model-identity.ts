@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type {
   HaBinding,
+  HaCoverCapabilityConfig,
   HaLightCapabilityConfig,
   HaManualDeviceType,
 } from "../types/ha";
@@ -15,6 +16,7 @@ type HomeAssistantObjectData = {
   bindings?: HaBinding[];
   isGroup?: boolean;
   capabilities?: {
+    cover?: HaCoverCapabilityConfig;
     light?: HaLightCapabilityConfig;
   };
 };
@@ -84,6 +86,21 @@ export function setLightCapabilityConfig(
   };
 }
 
+export function getCoverCapabilityConfig(object: THREE.Object3D) {
+  return getHomeAssistantData(object).capabilities?.cover ?? null;
+}
+
+export function setCoverCapabilityConfig(
+  object: THREE.Object3D,
+  config: HaCoverCapabilityConfig,
+) {
+  const data = getHomeAssistantData(object);
+  data.capabilities = {
+    ...data.capabilities,
+    cover: config,
+  };
+}
+
 export function isModelGroup(object: THREE.Object3D) {
   return getHomeAssistantData(object).isGroup === true;
 }
@@ -123,4 +140,92 @@ export function ensureModelObjectIds(root: THREE.Object3D) {
   }
 
   visit(root, "", slugify(displayName(root)));
+}
+
+export function assignFreshModelObjectIds(
+  root: THREE.Object3D,
+  existingObjectIds: Iterable<string | null | undefined>,
+) {
+  const used = new Set(
+    [...existingObjectIds].filter((value): value is string => Boolean(value)),
+  );
+
+  function uniqueObjectId(basePath: string) {
+    let objectId = basePath;
+    let index = 2;
+    while (used.has(objectId)) {
+      objectId = `${basePath}_${index}`;
+      index += 1;
+    }
+    used.add(objectId);
+    return objectId;
+  }
+
+  function visit(object: THREE.Object3D, parentPath: string, pathName: string) {
+    const data = getHomeAssistantData(object);
+    const basePath = parentPath ? `${parentPath}/${pathName}` : pathName;
+    data.objectId = uniqueObjectId(basePath);
+
+    const childNameCounts = new Map<string, number>();
+    for (const child of object.children) {
+      const childBase = slugify(displayName(child));
+      const nextCount = (childNameCounts.get(childBase) ?? 0) + 1;
+      childNameCounts.set(childBase, nextCount);
+      const childPathName = nextCount === 1 ? childBase : `${childBase}_${nextCount}`;
+      visit(child, data.objectId, childPathName);
+    }
+  }
+
+  visit(root, "", slugify(displayName(root)));
+}
+
+function findObjectByModelObjectId(
+  root: THREE.Object3D,
+  objectId: string | undefined,
+): THREE.Object3D | null {
+  const normalized = objectId?.trim();
+  if (!normalized) {
+    return null;
+  }
+  let match: THREE.Object3D | null = null;
+  root.traverse((object) => {
+    if (!match && getModelObjectId(object) === normalized) {
+      match = object;
+    }
+  });
+  return match;
+}
+
+export function syncCoverTargetBindings(
+  root: THREE.Object3D,
+  host: THREE.Object3D,
+  config: HaCoverCapabilityConfig,
+) {
+  if (!config.enabled || config.openMode !== "symmetrical") {
+    return;
+  }
+  const hostBindings = getObjectBindings(host);
+  const targets: THREE.Object3D[] = [];
+  const leftTarget = findObjectByModelObjectId(root, config.leftObjectId);
+  const rightTarget = findObjectByModelObjectId(root, config.rightObjectId);
+  if (leftTarget && leftTarget !== host) {
+    targets.push(leftTarget);
+  }
+  if (rightTarget && rightTarget !== host && rightTarget !== leftTarget) {
+    targets.push(rightTarget);
+  }
+
+  for (const target of targets) {
+    setObjectBindings(target, hostBindings);
+    setManualDeviceType(target, "cover");
+  }
+}
+
+export function syncAllCoverTargetBindings(root: THREE.Object3D) {
+  root.traverse((object) => {
+    const config = getCoverCapabilityConfig(object);
+    if (config) {
+      syncCoverTargetBindings(root, object, config);
+    }
+  });
 }

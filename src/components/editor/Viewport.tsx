@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { EditorHistoryState } from "../../lib/editor-history";
 import { ThreeEditor } from "../../lib/three-editor";
-import type { ViewMode } from "../../types/editor";
+import type { PerformanceConfig, ViewMode } from "../../types/editor";
 
 type ViewportProps = {
+  performance: PerformanceConfig;
   onReady: (editor: ThreeEditor | null) => void;
   onSelectionChange: (uuids: string[]) => void;
   onModelChange: () => void;
   onHistoryChange: (state: EditorHistoryState) => void;
   onLoadProgress: (progress: number) => void;
+  onObjectContextMenu: (event: { clientX: number; clientY: number; uuid: string }) => void;
   canDropModel: (dataTransfer: DataTransfer) => boolean;
   onModelDrop: (
     dataTransfer: DataTransfer,
@@ -21,11 +23,13 @@ type ViewportProps = {
 };
 
 export function Viewport({
+  performance,
   onReady,
   onSelectionChange,
   onModelChange,
   onHistoryChange,
   onLoadProgress,
+  onObjectContextMenu,
   canDropModel,
   onModelDrop,
   isLoading,
@@ -34,11 +38,13 @@ export function Viewport({
   previewMode,
 }: ViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const initialRenderBackendRef = useRef(performance.renderBackend);
   const callbacksRef = useRef({
     onSelectionChange,
     onModelChange,
     onHistoryChange,
     onLoadProgress,
+    onObjectContextMenu,
   });
   const editorRef = useRef<ThreeEditor | null>(null);
   const [fps, setFps] = useState<number | null>(null);
@@ -49,28 +55,39 @@ export function Viewport({
       onModelChange,
       onHistoryChange,
       onLoadProgress,
+      onObjectContextMenu,
     };
-  }, [onHistoryChange, onLoadProgress, onModelChange, onSelectionChange]);
+  }, [onHistoryChange, onLoadProgress, onModelChange, onObjectContextMenu, onSelectionChange]);
 
   useEffect(() => {
     if (!hostRef.current) {
       return;
     }
     const editor = new ThreeEditor(hostRef.current, {
+      renderBackend: initialRenderBackendRef.current,
+      quality: performance.quality,
       onSelectionChange: (uuid) => callbacksRef.current.onSelectionChange(uuid),
       onModelChange: () => callbacksRef.current.onModelChange(),
       onHistoryChange: (state) => callbacksRef.current.onHistoryChange(state),
       onLoadProgress: (progress) => callbacksRef.current.onLoadProgress(progress),
+      onObjectContextMenu: (event) => callbacksRef.current.onObjectContextMenu(event),
       onFpsChange: setFps,
     });
-    editor.init();
-    editorRef.current = editor;
-    if (import.meta.env.DEV) {
-      (window as Window & { __threeEditor?: ThreeEditor }).__threeEditor = editor;
-    }
-    onReady(editor);
+    let disposed = false;
+    void editor.init().then(() => {
+      if (disposed) {
+        editor.dispose();
+        return;
+      }
+      editorRef.current = editor;
+      if (import.meta.env.DEV) {
+        (window as Window & { __threeEditor?: ThreeEditor }).__threeEditor = editor;
+      }
+      onReady(editor);
+    });
 
     return () => {
+      disposed = true;
       editorRef.current = null;
       if (import.meta.env.DEV) {
         delete (window as Window & { __threeEditor?: ThreeEditor }).__threeEditor;
@@ -79,6 +96,10 @@ export function Viewport({
       onReady(null);
     };
   }, [onReady]);
+
+  useEffect(() => {
+    editorRef.current?.setPerformanceConfig(performance);
+  }, [performance]);
 
   useEffect(() => {
     editorRef.current?.setViewMode(viewMode);

@@ -58,6 +58,7 @@ type TopToolbarProps = {
   fullscreen: boolean;
   onUploadClick: () => void;
   onExport: () => void;
+  onImportConfigClick: () => void;
   onTogglePreview: () => void;
   onPreviewCameraModeChange: (mode: PreviewCameraMode) => void;
   onToggleFullscreen: () => void;
@@ -290,6 +291,7 @@ export function TopToolbar({
   fullscreen,
   onUploadClick,
   onExport,
+  onImportConfigClick,
   onTogglePreview,
   onPreviewCameraModeChange,
   onToggleFullscreen,
@@ -417,6 +419,15 @@ export function TopToolbar({
               >
                 <Upload data-icon="inline-start" />
                 上传
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onImportConfigClick}
+                disabled={isLoading}
+              >
+                <Upload data-icon="inline-start" />
+                配置
               </Button>
               <Button
                 variant="secondary"

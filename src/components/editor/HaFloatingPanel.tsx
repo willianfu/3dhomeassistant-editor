@@ -1,9 +1,14 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { getBoundEntityIds } from "../../lib/ha-bindings";
 import { getEntityDomain } from "../../lib/ha-client";
 import { placeFloatingPanel } from "../../lib/floating-panel-placement";
-import type { HaBinding, HaEntityState, HaLightCapabilityConfig } from "../../types/ha";
+import type {
+  HaBinding,
+  HaCoverCapabilityConfig,
+  HaEntityState,
+  HaLightCapabilityConfig,
+} from "../../types/ha";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -15,6 +20,7 @@ import { HaLightControl } from "./HaLightControl";
 type HaFloatingPanelProps = {
   anchor: { x: number; y: number } | null;
   bindings: HaBinding[];
+  coverCapability: HaCoverCapabilityConfig | null;
   lightCapability: HaLightCapabilityConfig | null;
   states: Record<string, HaEntityState>;
   onCall: (
@@ -25,9 +31,10 @@ type HaFloatingPanelProps = {
   onClose: () => void;
 };
 
-export function HaFloatingPanel({
+export const HaFloatingPanel = memo(function HaFloatingPanel({
   anchor,
   bindings,
+  coverCapability,
   lightCapability,
   states,
   onCall,
@@ -109,6 +116,7 @@ export function HaFloatingPanel({
                 key={entityId}
                 entityId={entityId}
                 state={states[entityId]}
+                coverCapability={coverCapability}
                 onCall={onCall}
               />
             ))}
@@ -117,4 +125,4 @@ export function HaFloatingPanel({
       </CardContent>
     </Card>
   );
-}
+});

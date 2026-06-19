@@ -11,12 +11,14 @@ import {
   closeHaFloatingPanel,
   openHaFloatingPanel,
   removeMissingHaFloatingPanels,
+  shouldUpdateFloatingPanelAnchors,
   type HaFloatingPanelState,
 } from "./lib/ha-floating-panels";
 import { addHaBinding, getBoundEntityIds } from "./lib/ha-bindings";
 import { isFullscreen, toggleFullscreen } from "./lib/fullscreen";
 import {
   loadEditorLocalConfig,
+  normalizePerformanceConfig,
   saveEditorLocalConfig,
   type EditorLocalConfig,
 } from "./lib/editor-local-config";
@@ -41,17 +43,32 @@ import {
 } from "./lib/model-tree";
 import type { EditorHistoryState } from "./lib/editor-history";
 import type { ThreeEditor } from "./lib/three-editor";
-import type { HaBinding, HaLightCapabilityConfig, HaManualDeviceType } from "./types/ha";
+import { Loader2 } from "lucide-react";
+import type {
+  HaBinding,
+  HaCoverCapabilityConfig,
+  HaLightCapabilityConfig,
+  HaManualDeviceType,
+} from "./types/ha";
 import type {
   EnvironmentConfig,
   ModelTreeNode,
   ObjectMetadata,
+  PerformanceConfig,
   PreviewCameraMode,
   SelectionTransformInfo,
   ViewMode,
   Vector3Values,
 } from "./types/editor";
-import { defaultEnvironment } from "./types/editor";
+import { defaultEnvironment, defaultPerformance } from "./types/editor";
+import { Button } from "./components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "./components/ui/dialog";
 
 function anchorsEqual(
   current: Record<string, { x: number; y: number } | null>,
@@ -90,6 +107,8 @@ function isSupportedModel(file: File) {
   return isSupportedModelFile(file);
 }
 
+const FLOATING_PANEL_ANCHOR_UPDATE_INTERVAL_MS = 50;
+
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -104,6 +123,7 @@ function isEditableTarget(target: EventTarget | null) {
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const configInputRef = useRef<HTMLInputElement | null>(null);
   const libraryFileInputRef = useRef<HTMLInputElement | null>(null);
   const [editor, setEditor] = useState<ThreeEditor | null>(null);
   const [tree, setTree] = useState<ModelTreeNode | null>(null);
@@ -124,6 +144,15 @@ export default function App() {
     isDirty: false,
   });
   const [bindingDialogOpen, setBindingDialogOpen] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportingMode, setExportingMode] = useState<"compressed" | "default" | null>(
+    null,
+  );
+  const [objectMenu, setObjectMenu] = useState<{
+    x: number;
+    y: number;
+    uuid: string;
+  } | null>(null);
   const [floatingPanels, setFloatingPanels] = useState<HaFloatingPanelState[]>([]);
   const [floatingAnchors, setFloatingAnchors] = useState<
     Record<string, { x: number; y: number } | null>
@@ -135,6 +164,9 @@ export default function App() {
   const ha = useHomeAssistant(haConfig);
   const [environment, setEnvironment] = useState<EnvironmentConfig>(
     localConfigRef.current?.environment ?? defaultEnvironment,
+  );
+  const [performanceConfig, setPerformanceConfig] = useState<PerformanceConfig>(
+    localConfigRef.current?.performance ?? defaultPerformance,
   );
   const [weather, setWeather] = useState<WeatherConfig>(
     localConfigRef.current?.weather ?? defaultWeather,
@@ -179,9 +211,22 @@ export default function App() {
     return editor.getSelectedBindings();
   }, [editor, modelVersion, selectedIds]);
 
+  const floatingPanelData = useMemo(
+    () =>
+      floatingPanels.map((panel) => ({
+        ...panel,
+        bindings: editor?.getBindingsForObjects(panel.objectIds) ?? [],
+        coverCapability: editor?.getCoverCapabilityForObjects(panel.objectIds) ?? null,
+        lightCapability: editor?.getLightCapabilityForObjects(panel.objectIds) ?? null,
+      })),
+    [editor, floatingPanels, modelVersion],
+  );
+
   useEffect(() => {
     let frame = 0;
+    let lastAnchorUpdateTime = 0;
     const updateAnchors = () => {
+      const now = performance.now();
       if (!editor) {
         setFloatingAnchors((current) =>
           Object.keys(current).length === 0 ? current : {},
@@ -196,14 +241,17 @@ export default function App() {
         frame = window.requestAnimationFrame(updateAnchors);
         return;
       }
-      const existingObjectIds = new Set(
-        floatingPanels
-          .flatMap((panel) => panel.objectIds)
-          .filter((objectId) => Boolean(editor.getObject(objectId))),
-      );
-      setFloatingPanels((panels) =>
-        removeMissingHaFloatingPanels(panels, existingObjectIds),
-      );
+      if (
+        !shouldUpdateFloatingPanelAnchors({
+          now,
+          lastUpdateTime: lastAnchorUpdateTime,
+          intervalMs: FLOATING_PANEL_ANCHOR_UPDATE_INTERVAL_MS,
+        })
+      ) {
+        frame = window.requestAnimationFrame(updateAnchors);
+        return;
+      }
+      lastAnchorUpdateTime = now;
       setFloatingAnchors((current) => {
         const next: Record<string, { x: number; y: number } | null> = {};
         for (const panel of floatingPanels) {
@@ -215,7 +263,21 @@ export default function App() {
     };
     frame = window.requestAnimationFrame(updateAnchors);
     return () => window.cancelAnimationFrame(frame);
-  }, [editor, floatingPanels, modelVersion, viewMode]);
+  }, [editor, floatingPanels, viewMode]);
+
+  useEffect(() => {
+    if (!editor || floatingPanels.length === 0) {
+      return;
+    }
+    const existingObjectIds = new Set(
+      floatingPanels
+        .flatMap((panel) => panel.objectIds)
+        .filter((objectId) => Boolean(editor.getObject(objectId))),
+    );
+    setFloatingPanels((panels) =>
+      removeMissingHaFloatingPanels(panels, existingObjectIds),
+    );
+  }, [editor, floatingPanels, modelVersion]);
 
   useEffect(() => {
     if (!editor || selectedIds.length === 0) {
@@ -344,16 +406,17 @@ export default function App() {
 
   useEffect(() => {
     const nextConfig =
-      editor?.createLocalConfig(environment, weather, haConfig) ?? {
+      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig) ?? {
         version: 1,
         environment,
+        performance: performanceConfig,
         weather,
         ha: haConfig,
         objects: localConfigRef.current?.objects ?? {},
       };
     localConfigRef.current = nextConfig;
     saveEditorLocalConfig(nextConfig);
-  }, [editor, environment, haConfig, modelVersion, weather]);
+  }, [editor, environment, haConfig, modelVersion, performanceConfig, weather]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -370,6 +433,9 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setObjectMenu(null);
+      }
       if (previewMode) {
         return;
       }
@@ -405,8 +471,22 @@ export default function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [editor, previewMode, refreshTree]);
 
+  useEffect(() => {
+    const closeObjectMenu = () => setObjectMenu(null);
+    window.addEventListener("click", closeObjectMenu);
+    window.addEventListener("scroll", closeObjectMenu, true);
+    return () => {
+      window.removeEventListener("click", closeObjectMenu);
+      window.removeEventListener("scroll", closeObjectMenu, true);
+    };
+  }, []);
+
   const handleUploadClick = () => {
     fileInputRef.current?.click();
+  };
+
+  const handleImportConfigClick = () => {
+    configInputRef.current?.click();
   };
 
   const handleLibraryUploadClick = () => {
@@ -444,6 +524,34 @@ export default function App() {
       setError(loadError instanceof Error ? loadError.message : "模型加载失败。");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleConfigFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as EditorLocalConfig;
+      if (parsed.version !== 1 || !parsed.environment || !parsed.weather || !parsed.objects) {
+        throw new Error("配置文件格式不正确。");
+      }
+      localConfigRef.current = parsed;
+      saveEditorLocalConfig(parsed);
+      setEnvironment({ ...defaultEnvironment, ...(parsed.environment ?? {}) });
+      setPerformanceConfig(normalizePerformanceConfig(parsed.performance));
+      setWeather({ ...defaultWeather, ...(parsed.weather ?? {}) });
+      setHaConfig(parsed.ha ?? defaultHaRuntimeConfig());
+      editor?.applyLocalConfig(parsed);
+      refreshTree();
+      setError(null);
+    } catch (configError) {
+      setError(configError instanceof Error ? configError.message : "配置导入失败。");
     }
   };
 
@@ -548,17 +656,40 @@ export default function App() {
     editor?.selectObject(uuid);
   };
 
-  const handleExport = async () => {
+  const handleExportModel = async (compressed = false) => {
     if (!editor) {
       return;
     }
+    setExportingMode(compressed ? "compressed" : "default");
     try {
-      const blob = await editor.exportGlb();
-      downloadBlob(blob, "smart-home-model.glb");
+      const blob = await editor.exportGlb({ compressed });
+      downloadBlob(blob, compressed ? "smart-home-model-draco.glb" : "smart-home-model.glb");
       editor.markSaved();
+      setExportDialogOpen(false);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "导出失败。");
+    } finally {
+      setExportingMode(null);
     }
+  };
+
+  const handleExportConfig = () => {
+    const config =
+      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig) ??
+      localConfigRef.current ??
+      {
+        version: 1,
+        environment,
+        performance: performanceConfig,
+        weather,
+        ha: haConfig,
+        objects: {},
+      };
+    const blob = new Blob([JSON.stringify(config, null, 2)], {
+      type: "application/json",
+    });
+    downloadBlob(blob, "3dhome-editor-config.json");
+    setExportDialogOpen(false);
   };
 
   const handleEnvironmentChange = (config: EnvironmentConfig) => {
@@ -601,6 +732,14 @@ export default function App() {
     if (editor?.deleteSelected()) {
       refreshTree();
     }
+    setObjectMenu(null);
+  };
+
+  const handleDuplicateSelected = () => {
+    if (editor?.duplicateSelected()) {
+      refreshTree();
+    }
+    setObjectMenu(null);
   };
 
   const handleGroupSelected = () => {
@@ -616,6 +755,11 @@ export default function App() {
 
   const handleLightCapabilityChange = (config: HaLightCapabilityConfig) => {
     editor?.updateLightCapabilityForSelection(config);
+    setModelVersion((version) => version + 1);
+  };
+
+  const handleCoverCapabilityChange = (config: HaCoverCapabilityConfig) => {
+    editor?.updateCoverCapabilityForSelection(config);
     setModelVersion((version) => version + 1);
   };
 
@@ -646,7 +790,8 @@ export default function App() {
         weatherStatus={weatherStatus}
         fullscreen={fullscreen}
         onUploadClick={handleUploadClick}
-        onExport={handleExport}
+        onImportConfigClick={handleImportConfigClick}
+        onExport={() => setExportDialogOpen(true)}
         onTogglePreview={() => setPreviewMode((value) => !value)}
         onPreviewCameraModeChange={setPreviewCameraMode}
         onToggleFullscreen={() => void toggleFullscreen()}
@@ -675,6 +820,13 @@ export default function App() {
         accept=".glb,.gltf,.obj,model/gltf-binary,model/gltf+json"
         className="hidden"
         onChange={handleFileChange}
+      />
+      <input
+        ref={configInputRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={handleConfigFileChange}
       />
       <input
         ref={libraryFileInputRef}
@@ -706,11 +858,15 @@ export default function App() {
           />
         </div>
         <Viewport
+          performance={performanceConfig}
           onReady={setEditor}
           onSelectionChange={setSelectedIds}
           onModelChange={() => setModelVersion((version) => version + 1)}
           onHistoryChange={setHistoryState}
           onLoadProgress={() => undefined}
+          onObjectContextMenu={(event) =>
+            setObjectMenu({ x: event.clientX, y: event.clientY, uuid: event.uuid })
+          }
           canDropModel={canDropLibraryModel}
           onModelDrop={(dataTransfer, point) =>
             void handleViewportDrop(dataTransfer, point)
@@ -720,6 +876,32 @@ export default function App() {
           viewMode={viewMode}
           previewMode={previewMode}
         />
+        {objectMenu && !previewMode ? (
+          <div
+            className="fixed z-40 grid min-w-[120px] gap-1 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-xl"
+            style={{
+              left: Math.min(objectMenu.x, window.innerWidth - 132),
+              top: Math.min(objectMenu.y, window.innerHeight - 92),
+            }}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
+              onClick={handleDuplicateSelected}
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1.5 text-left text-destructive hover:bg-destructive/10"
+              onClick={handleDeleteSelected}
+            >
+              删除
+            </button>
+          </div>
+        ) : null}
         <div
           aria-hidden={rightCollapsed || previewMode}
           className={cn(
@@ -731,6 +913,7 @@ export default function App() {
         >
           <RightInspector
             environment={environment}
+            performance={performanceConfig}
             haConfig={haConfig}
             haStatus={ha.status}
             haStatusMessage={ha.statusMessage}
@@ -739,6 +922,7 @@ export default function App() {
             selectionBindings={selectionBindings}
             selectedCount={selectedIds.length}
             onEnvironmentChange={handleEnvironmentChange}
+            onPerformanceChange={setPerformanceConfig}
             onHaConfigChange={setHaConfig}
             onRetryHaConnection={ha.retryConnection}
             onPositionChange={handlePositionChange}
@@ -748,6 +932,7 @@ export default function App() {
             onUniformScale={handleUniformScale}
             onOpenBindingDialog={() => setBindingDialogOpen(true)}
             onBindingsChange={handleBindingsChange}
+            onCoverCapabilityChange={handleCoverCapabilityChange}
             onLightCapabilityChange={handleLightCapabilityChange}
             onManualDeviceTypeChange={handleManualDeviceTypeChange}
             haStates={ha.states}
@@ -767,14 +952,13 @@ export default function App() {
             onBind={handleBind}
           />
         ) : null}
-        {floatingPanels.map((panel) => (
+        {floatingPanelData.map((panel) => (
           <HaFloatingPanel
             key={panel.id}
             anchor={floatingAnchors[panel.id] ?? null}
-            bindings={editor?.getBindingsForObjects(panel.objectIds) ?? []}
-            lightCapability={
-              editor?.getLightCapabilityForObjects(panel.objectIds) ?? null
-            }
+            bindings={panel.bindings}
+            coverCapability={panel.coverCapability}
+            lightCapability={panel.lightCapability}
             states={ha.states}
             onCall={(entityId, service, serviceData) =>
               void ha.callEntity(entityId, service, serviceData)
@@ -784,6 +968,48 @@ export default function App() {
             }
           />
         ))}
+        <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+          <DialogContent className="max-w-[360px]">
+            <DialogHeader>
+              <DialogTitle>导出选项</DialogTitle>
+              <DialogDescription>选择要导出的模型或配置数据。</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <Button
+                type="button"
+                className="justify-start"
+                disabled={exportingMode !== null}
+                onClick={() => void handleExportModel(true)}
+              >
+                {exportingMode === "compressed" ? (
+                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                ) : null}
+                导出压缩后的模型
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                className="justify-start"
+                disabled={exportingMode !== null}
+                onClick={() => void handleExportModel(false)}
+              >
+                {exportingMode === "default" ? (
+                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                ) : null}
+                导出默认大小模型
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="justify-start"
+                disabled={exportingMode !== null}
+                onClick={handleExportConfig}
+              >
+                导出设置数据
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </main>
   );

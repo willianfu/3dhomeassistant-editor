@@ -1,4 +1,9 @@
-import type { HaBinding, HaLightCapabilityConfig, HaManualDeviceType } from "./ha";
+import type {
+  HaBinding,
+  HaCoverCapabilityConfig,
+  HaLightCapabilityConfig,
+  HaManualDeviceType,
+} from "./ha";
 
 export type Vector3Values = {
   x: number;
@@ -23,6 +28,7 @@ export type ObjectMetadata = {
   entityId: string | null;
   deviceType: HaManualDeviceType;
   bindings: HaBinding[];
+  coverCapability: HaCoverCapabilityConfig | null;
   lightCapability: HaLightCapabilityConfig | null;
   name: string;
   type: string;
@@ -50,6 +56,19 @@ export type EnvironmentConfig = {
   exposure: number;
   gridVisible: boolean;
   wallOpacity: number;
+};
+
+export type RenderBackend = "webgl" | "webgpu";
+export type RenderQuality = "low" | "medium" | "high" | "ultra";
+
+export type PerformanceConfig = {
+  renderBackend: RenderBackend;
+  quality: RenderQuality;
+};
+
+export const defaultPerformance: PerformanceConfig = {
+  renderBackend: "webgl",
+  quality: "high",
 };
 
 export type ViewMode = "perspective" | "top" | "front" | "side";

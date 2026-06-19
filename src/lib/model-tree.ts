@@ -69,6 +69,7 @@ export function getObjectMetadata(object: THREE.Object3D): ObjectMetadata {
     entityId: homeAssistantData.entityId ?? null,
     deviceType: homeAssistantData.deviceType ?? "auto",
     bindings: homeAssistantData.bindings ?? [],
+    coverCapability: homeAssistantData.capabilities?.cover ?? null,
     lightCapability: homeAssistantData.capabilities?.light ?? null,
     name: displayName(object),
     type: object.type,

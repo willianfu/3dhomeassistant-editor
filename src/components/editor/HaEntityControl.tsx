@@ -19,7 +19,7 @@ import {
   ToggleRight,
 } from "lucide-react";
 import { getEntityDomain } from "../../lib/ha-client";
-import type { HaEntityState } from "../../types/ha";
+import type { HaCoverCapabilityConfig, HaCoverOpenMode, HaEntityState } from "../../types/ha";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -37,6 +37,7 @@ import { Slider } from "../ui/slider";
 type HaEntityControlProps = {
   entityId: string;
   state?: HaEntityState;
+  coverCapability?: HaCoverCapabilityConfig | null;
   onCall: (
     entityId: string,
     service: string,
@@ -66,6 +67,10 @@ function optionList(state?: HaEntityState) {
 
 function clampPercent(value: number) {
   return Math.min(Math.max(value, 0), 100);
+}
+
+function roundPercent(value: number) {
+  return Math.round(clampPercent(value));
 }
 
 function percentFromClientX(
@@ -114,9 +119,11 @@ function EntityCard({ children }: { children: React.ReactNode }) {
 
 function CoverCurtainSlider({
   value,
+  openMode = "symmetrical",
   onCommit,
 }: {
   value: number;
+  openMode?: HaCoverOpenMode;
   onCommit: (value: number) => void;
 }) {
   const [draft, setDraft] = useState(value);
@@ -130,7 +137,7 @@ function CoverCurtainSlider({
   }, [value]);
 
   const updateDraft = (nextValue: number) => {
-    const next = clampPercent(nextValue);
+    const next = roundPercent(nextValue);
     draftRef.current = next;
     setDraft(next);
   };
@@ -165,8 +172,12 @@ function CoverCurtainSlider({
     commitDraft();
   };
 
-  const left = (100 - draft) / 2;
-  const right = 100 - left;
+  const symmetrical = openMode === "symmetrical";
+  const left = symmetrical ? (100 - draft) / 2 : 0;
+  const right = symmetrical ? 100 - left : draft;
+  const fillWidth = symmetrical ? 100 - draft : draft;
+  const leftHandle = `clamp(14px, ${left}%, calc(100% - 14px))`;
+  const rightHandle = `clamp(14px, ${right}%, calc(100% - 14px))`;
 
   return (
     <div className="grid gap-1.5">
@@ -179,29 +190,45 @@ function CoverCurtainSlider({
         onPointerUp={endPointer}
         onPointerCancel={endPointer}
       >
-        <div
-          className="absolute inset-y-0 bg-sky-200/90"
-          style={{ left: `${left}%`, right: `${100 - right}%` }}
-        />
-        <div
-          className="absolute inset-y-1 left-1 rounded-sm bg-sky-500/85"
-          style={{ width: `${left}%` }}
-        />
-        <div
-          className="absolute inset-y-1 right-1 rounded-sm bg-sky-500/85"
-          style={{ width: `${100 - right}%` }}
-        />
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
-          style={{ left: `${left}%` }}
-        />
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
-          style={{ left: `${right}%` }}
-        />
-        <ChevronsLeftRight className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sky-900/60" />
+        {symmetrical ? (
+          <>
+            <div
+              className="absolute inset-y-0 bg-sky-200/90"
+              style={{ left: `${left}%`, right: `${100 - right}%` }}
+            />
+            <div
+              className="absolute inset-y-1 left-1 rounded-sm bg-sky-500/85"
+              style={{ width: `${left}%` }}
+            />
+            <div
+              className="absolute inset-y-1 right-1 rounded-sm bg-sky-500/85"
+              style={{ width: `${100 - right}%` }}
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
+              style={{ left: leftHandle }}
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
+              style={{ left: rightHandle }}
+            />
+            <ChevronsLeftRight className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sky-900/60" />
+          </>
+        ) : (
+          <>
+            <div
+              className="absolute inset-y-1 left-1 rounded-sm bg-sky-500/85"
+              style={{ width: `${fillWidth}%` }}
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[5px] border-sky-500 bg-background shadow-lg"
+              style={{ left: rightHandle }}
+            />
+          </>
+        )}
         <input
           aria-label="窗帘开合滑条"
           type="range"
@@ -325,7 +352,12 @@ function StatusBadge({ stateText }: { stateText: string }) {
   );
 }
 
-export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProps) {
+export function HaEntityControl({
+  entityId,
+  state,
+  coverCapability,
+  onCall,
+}: HaEntityControlProps) {
   const domain = getEntityDomain(entityId);
   const isOn = state?.state === "on" || state?.state === "open" || state?.state === "unlocked";
   const stateText = state?.state ?? "unknown";
@@ -586,7 +618,7 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
   }
 
   if (domain === "cover") {
-    const position = clampPercent(
+    const position = roundPercent(
       numericStateValue(state, ["current_position", "position"], 0),
     );
     const presetPositions = [0, 25, 55, 75, 100];
@@ -649,6 +681,7 @@ export function HaEntityControl({ entityId, state, onCall }: HaEntityControlProp
         </div>
         <CoverCurtainSlider
           value={position}
+          openMode={coverCapability?.openMode ?? "symmetrical"}
           onCommit={(nextPosition) =>
             onCall(entityId, "set_cover_position", { position: nextPosition })
           }

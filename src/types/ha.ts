@@ -61,6 +61,19 @@ export type HaLightCapabilityConfig = {
   colorTemperatureEntityId?: string;
 };
 
+export type HaCoverOpenMode = "symmetrical" | "left" | "right" | "down" | "up";
+
+export type HaCoverCapabilityConfig = {
+  enabled: boolean;
+  openMode: HaCoverOpenMode;
+  minVisiblePercent?: number;
+  closedVisibleDistance?: number;
+  openTravelDistance?: number;
+  animationSpeedMetersPerSecond?: number;
+  leftObjectId?: string;
+  rightObjectId?: string;
+};
+
 export type HaServiceTarget = {
   entity_id: string;
 };

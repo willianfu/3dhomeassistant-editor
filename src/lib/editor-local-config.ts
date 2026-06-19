@@ -1,7 +1,14 @@
 import * as THREE from "three";
-import { defaultEnvironment, type EnvironmentConfig } from "../types/editor";
+import {
+  defaultEnvironment,
+  defaultPerformance,
+  type EnvironmentConfig,
+  type PerformanceConfig,
+  type RenderQuality,
+} from "../types/editor";
 import type {
   HaBinding,
+  HaCoverCapabilityConfig,
   HaLightCapabilityConfig,
   HaManualDeviceType,
 } from "../types/ha";
@@ -11,9 +18,11 @@ import type { WeatherConfig } from "./weather-presets";
 import { defaultWeather } from "./weather-presets";
 import {
   getLightCapabilityConfig,
+  getCoverCapabilityConfig,
   getManualDeviceType,
   getModelObjectId,
   getObjectBindings,
+  setCoverCapabilityConfig,
   setLightCapabilityConfig,
   setManualDeviceType,
   setObjectBindings,
@@ -21,6 +30,7 @@ import {
 
 export const EDITOR_LOCAL_CONFIG_KEY = "3dhomeassistant.editor.config";
 const legacyDefaultWeatherLocation = "116.41,39.92";
+const renderQualities: RenderQuality[] = ["low", "medium", "high", "ultra"];
 
 type StorageLike = {
   getItem: (key: string) => string | null;
@@ -30,21 +40,40 @@ type StorageLike = {
 export type EditorObjectLocalConfig = {
   bindings?: HaBinding[];
   deviceType?: HaManualDeviceType;
+  coverCapability?: HaCoverCapabilityConfig;
   lightCapability?: HaLightCapabilityConfig;
 };
 
 export type EditorLocalConfig = {
   version: 1;
   environment: EnvironmentConfig;
+  performance: PerformanceConfig;
   weather: WeatherConfig;
   ha: HaRuntimeConfig;
   objects: Record<string, EditorObjectLocalConfig>;
 };
 
+export function normalizePerformanceConfig(
+  config: Partial<PerformanceConfig> | null | undefined,
+): PerformanceConfig {
+  return {
+    ...defaultPerformance,
+    ...(config ?? {}),
+    renderBackend:
+      config?.renderBackend === "webgpu" || config?.renderBackend === "webgl"
+        ? config.renderBackend
+        : defaultPerformance.renderBackend,
+    quality: renderQualities.includes(config?.quality as RenderQuality)
+      ? (config?.quality as RenderQuality)
+      : defaultPerformance.quality,
+  };
+}
+
 function hasObjectConfig(config: EditorObjectLocalConfig) {
   return (
     (config.bindings?.length ?? 0) > 0 ||
     (config.deviceType !== undefined && config.deviceType !== "auto") ||
+    Boolean(config.coverCapability) ||
     Boolean(config.lightCapability)
   );
 }
@@ -54,6 +83,7 @@ export function createEditorLocalConfig(
   environment: EnvironmentConfig,
   weather: WeatherConfig,
   ha: HaRuntimeConfig,
+  performance: PerformanceConfig = defaultPerformance,
 ): EditorLocalConfig {
   const objects: Record<string, EditorObjectLocalConfig> = {};
   root.traverse((object) => {
@@ -64,6 +94,7 @@ export function createEditorLocalConfig(
     const objectConfig: EditorObjectLocalConfig = {
       bindings: getObjectBindings(object),
       deviceType: getManualDeviceType(object),
+      coverCapability: getCoverCapabilityConfig(object) ?? undefined,
       lightCapability: getLightCapabilityConfig(object) ?? undefined,
     };
     if (hasObjectConfig(objectConfig)) {
@@ -74,6 +105,7 @@ export function createEditorLocalConfig(
   return {
     version: 1,
     environment,
+    performance: normalizePerformanceConfig(performance),
     weather,
     ha,
     objects,
@@ -105,6 +137,9 @@ export function applyEditorLocalConfig(
     if (objectConfig.lightCapability) {
       setLightCapabilityConfig(object, objectConfig.lightCapability);
     }
+    if (objectConfig.coverCapability) {
+      setCoverCapabilityConfig(object, objectConfig.coverCapability);
+    }
   });
 }
 
@@ -126,6 +161,7 @@ export function loadEditorLocalConfig(
         ...defaultEnvironment,
         ...(parsed.environment ?? {}),
       },
+      performance: normalizePerformanceConfig(parsed.performance),
       ha: parsed.ha ?? defaultHaRuntimeConfig(),
       weather: {
         ...defaultWeather,
