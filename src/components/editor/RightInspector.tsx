@@ -1,5 +1,5 @@
 import { Boxes, Copy, DoorOpen, Lightbulb, Link2, Trash2, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { removeHaBinding } from "../../lib/ha-bindings";
 import { defaultLightCapabilityConfig } from "../../lib/ha-capabilities/light";
 import { getEntityDomain } from "../../lib/ha-client";
@@ -8,6 +8,8 @@ import { getSolarEnvironmentPreset } from "../../lib/environment-lighting";
 import { cn } from "../../lib/utils";
 import type {
   EnvironmentConfig,
+  EditorRegion,
+  ObjectRegionAssignment,
   ObjectMetadata,
   PerformanceConfig,
   RenderBackend,
@@ -75,14 +77,17 @@ type RightInspectorProps = {
   onSizeChange: (size: Vector3Values) => void;
   onCenterChange: (center: Vector3Values) => void;
   onUniformScale: (multiplier: number) => void;
+  regions: EditorRegion[];
   onOpenBindingDialog: () => void;
   onBindingsChange: (bindings: HaBinding[]) => void;
   onCoverCapabilityChange: (config: HaCoverCapabilityConfig) => void;
   onLightCapabilityChange: (config: HaLightCapabilityConfig) => void;
   onManualDeviceTypeChange: (deviceType: HaManualDeviceType) => void;
+  onRegionAssignmentChange: (assignment: ObjectRegionAssignment) => void;
   haStates: Record<string, HaEntityState>;
   onGroupSelected: () => void;
   onDeleteSelected: () => void;
+  defaultTab?: "environment" | "model";
 };
 
 const NONE_VALUE = "__none";
@@ -139,16 +144,57 @@ function NumberField({
   step?: number;
   onChange: (value: number) => void;
 }) {
+  const formatNumber = (next: number) => (Number.isFinite(next) ? String(next) : "0");
+  const [draft, setDraft] = useState(formatNumber(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) {
+      setDraft(formatNumber(value));
+    }
+  }, [focused, value]);
+
+  const commitDraft = (rawValue: string) => {
+    setDraft(rawValue);
+    if (
+      rawValue.trim() === "" ||
+      rawValue === "-" ||
+      rawValue === "." ||
+      rawValue === "-."
+    ) {
+      return;
+    }
+    const next = Number(rawValue);
+    if (!Number.isFinite(next)) {
+      return;
+    }
+    const normalized = rawValue.match(/^-?0\d+$/) ? String(next) : rawValue;
+    if (normalized !== rawValue) {
+      setDraft(normalized);
+    }
+    onChange(next);
+  };
+
   return (
     <div className="grid gap-1.5">
       <Label>{label}</Label>
       <Input
-        type="number"
-        value={Number.isFinite(value) ? value : 0}
+        type="text"
+        inputMode="decimal"
+        aria-label={label}
+        value={draft}
         min={min}
         max={max}
         step={step}
-        onChange={(event) => onChange(Number(event.target.value))}
+        onFocus={() => setFocused(true)}
+        onBlur={() => {
+          setFocused(false);
+          const next = Number(draft);
+          if (!Number.isFinite(next)) {
+            setDraft(formatNumber(value));
+          }
+        }}
+        onChange={(event) => commitDraft(event.target.value)}
       />
     </div>
   );
@@ -320,6 +366,54 @@ function VectorFields({
         value={value.z}
         onChange={(z) => onChange({ ...value, z })}
       />
+    </div>
+  );
+}
+
+function RegionAssignmentSelect({
+  regions,
+  assignment,
+  resolvedRegionId,
+  onChange,
+}: {
+  regions: EditorRegion[];
+  assignment: ObjectRegionAssignment;
+  resolvedRegionId: string | null;
+  onChange: (assignment: ObjectRegionAssignment) => void;
+}) {
+  const resolvedRegion = regions.find((region) => region.id === resolvedRegionId);
+  return (
+    <div className="grid gap-1.5">
+      <Label>所属区域</Label>
+      <Select
+        value={assignment.mode === "manual" && assignment.regionId ? assignment.regionId : NONE_VALUE}
+        onValueChange={(value) =>
+          onChange(
+            value === NONE_VALUE
+              ? { mode: "auto", regionId: null, initialized: false }
+              : { mode: "manual", regionId: value, initialized: false },
+          )
+        }
+      >
+        <SelectTrigger aria-label="所属区域">
+          <SelectValue placeholder="自动匹配" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={NONE_VALUE}>自动匹配</SelectItem>
+            {regions.map((region) => (
+              <SelectItem key={region.id} value={region.id}>
+                {region.name}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <div className="text-[10px] leading-4 text-muted-foreground">
+        {assignment.mode === "manual"
+          ? "手动指定后不会跟随位置变化。"
+          : `自动匹配${resolvedRegion ? `：${resolvedRegion.name}` : "：暂无匹配"}`}
+      </div>
     </div>
   );
 }
@@ -997,14 +1091,17 @@ export function RightInspector({
   onSizeChange,
   onCenterChange,
   onUniformScale,
+  regions,
   onOpenBindingDialog,
   onBindingsChange,
   onCoverCapabilityChange,
   onLightCapabilityChange,
   onManualDeviceTypeChange,
+  onRegionAssignmentChange,
   haStates,
   onGroupSelected,
   onDeleteSelected,
+  defaultTab = "environment",
 }: RightInspectorProps) {
   const updateEnvironment = (patch: Partial<EnvironmentConfig>) => {
     onEnvironmentChange({ ...environment, ...patch });
@@ -1019,7 +1116,7 @@ export function RightInspector({
         <div className="text-sm font-semibold">配置栏</div>
         <div className="mt-1 text-xs text-muted-foreground">全局与选中模型属性</div>
       </div>
-      <Tabs defaultValue="environment" className="min-h-0 flex-1 px-4 py-3">
+      <Tabs defaultValue={defaultTab} className="min-h-0 flex-1 px-4 py-3">
         <TabsList className="grid w-full grid-cols-2">
           <TabsTrigger value="environment">全局配置</TabsTrigger>
           <TabsTrigger value="model">模型信息</TabsTrigger>
@@ -1093,6 +1190,22 @@ export function RightInspector({
                       <div className="text-xs text-muted-foreground">
                         高质量保持当前默认效果；低质量降低像素比并关闭阴影，超高质量增强阴影细节。
                       </div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="grid gap-1">
+                        <Label>超写实渲染</Label>
+                        <div className="text-xs text-muted-foreground">
+                          开启后增强玻璃、金属、布料材质和环境反射，适合最终预览。
+                        </div>
+                      </div>
+                      <Switch
+                        checked={performance.realisticRenderingEnabled}
+                        onCheckedChange={(checked) =>
+                          updatePerformance({
+                            realisticRenderingEnabled: checked,
+                          })
+                        }
+                      />
                     </div>
                   </AccordionContent>
                 </AccordionItem>
@@ -1288,6 +1401,12 @@ export function RightInspector({
                       labels={["X", "高度Y", "Z"]}
                       value={metadata.position}
                       onChange={onPositionChange}
+                    />
+                    <RegionAssignmentSelect
+                      regions={regions}
+                      assignment={metadata.regionAssignment}
+                      resolvedRegionId={metadata.resolvedRegionId}
+                      onChange={onRegionAssignmentChange}
                     />
                   </AccordionPanel>
                   <AccordionPanel value="size" title="尺寸与缩放">

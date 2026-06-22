@@ -5,6 +5,8 @@ import {
   type EnvironmentConfig,
   type PerformanceConfig,
   type RenderQuality,
+  type EditorRegion,
+  type ObjectRegionAssignment,
 } from "../types/editor";
 import type {
   HaBinding,
@@ -14,6 +16,7 @@ import type {
 } from "../types/ha";
 import type { HaRuntimeConfig } from "./ha-config";
 import { defaultHaRuntimeConfig } from "./ha-config";
+import { normalizeEditorRegions } from "./editor-regions";
 import type { WeatherConfig } from "./weather-presets";
 import { defaultWeather } from "./weather-presets";
 import {
@@ -21,10 +24,12 @@ import {
   getCoverCapabilityConfig,
   getManualDeviceType,
   getModelObjectId,
+  getObjectRegionAssignment,
   getObjectBindings,
   setCoverCapabilityConfig,
   setLightCapabilityConfig,
   setManualDeviceType,
+  setObjectRegionAssignment,
   setObjectBindings,
 } from "./model-identity";
 
@@ -42,6 +47,7 @@ export type EditorObjectLocalConfig = {
   deviceType?: HaManualDeviceType;
   coverCapability?: HaCoverCapabilityConfig;
   lightCapability?: HaLightCapabilityConfig;
+  regionAssignment?: ObjectRegionAssignment;
 };
 
 export type EditorLocalConfig = {
@@ -50,6 +56,7 @@ export type EditorLocalConfig = {
   performance: PerformanceConfig;
   weather: WeatherConfig;
   ha: HaRuntimeConfig;
+  regions: EditorRegion[];
   objects: Record<string, EditorObjectLocalConfig>;
 };
 
@@ -66,6 +73,7 @@ export function normalizePerformanceConfig(
     quality: renderQualities.includes(config?.quality as RenderQuality)
       ? (config?.quality as RenderQuality)
       : defaultPerformance.quality,
+    realisticRenderingEnabled: config?.realisticRenderingEnabled === true,
   };
 }
 
@@ -74,7 +82,12 @@ function hasObjectConfig(config: EditorObjectLocalConfig) {
     (config.bindings?.length ?? 0) > 0 ||
     (config.deviceType !== undefined && config.deviceType !== "auto") ||
     Boolean(config.coverCapability) ||
-    Boolean(config.lightCapability)
+    Boolean(config.lightCapability) ||
+    Boolean(
+      config.regionAssignment &&
+        (config.regionAssignment.mode === "manual" ||
+          config.regionAssignment.initialized === true),
+    )
   );
 }
 
@@ -84,6 +97,7 @@ export function createEditorLocalConfig(
   weather: WeatherConfig,
   ha: HaRuntimeConfig,
   performance: PerformanceConfig = defaultPerformance,
+  regions: EditorRegion[] = [],
 ): EditorLocalConfig {
   const objects: Record<string, EditorObjectLocalConfig> = {};
   root.traverse((object) => {
@@ -91,11 +105,16 @@ export function createEditorLocalConfig(
     if (!objectId) {
       return;
     }
+    const regionAssignment = getObjectRegionAssignment(object);
     const objectConfig: EditorObjectLocalConfig = {
       bindings: getObjectBindings(object),
       deviceType: getManualDeviceType(object),
       coverCapability: getCoverCapabilityConfig(object) ?? undefined,
       lightCapability: getLightCapabilityConfig(object) ?? undefined,
+      regionAssignment:
+        regionAssignment.mode === "manual" || regionAssignment.initialized
+          ? regionAssignment
+          : undefined,
     };
     if (hasObjectConfig(objectConfig)) {
       objects[objectId] = objectConfig;
@@ -108,6 +127,7 @@ export function createEditorLocalConfig(
     performance: normalizePerformanceConfig(performance),
     weather,
     ha,
+    regions: normalizeEditorRegions(regions),
     objects,
   };
 }
@@ -140,6 +160,9 @@ export function applyEditorLocalConfig(
     if (objectConfig.coverCapability) {
       setCoverCapabilityConfig(object, objectConfig.coverCapability);
     }
+    if (objectConfig.regionAssignment) {
+      setObjectRegionAssignment(object, objectConfig.regionAssignment);
+    }
   });
 }
 
@@ -163,6 +186,8 @@ export function loadEditorLocalConfig(
       },
       performance: normalizePerformanceConfig(parsed.performance),
       ha: parsed.ha ?? defaultHaRuntimeConfig(),
+      regions: normalizeEditorRegions(parsed.regions),
+      objects: normalizeEditorObjectConfigs(parsed.objects),
       weather: {
         ...defaultWeather,
         ...(parsed.weather ?? {}),
@@ -175,6 +200,33 @@ export function loadEditorLocalConfig(
   } catch {
     return null;
   }
+}
+
+function normalizeEditorObjectConfigs(
+  value: EditorLocalConfig["objects"] | undefined,
+): EditorLocalConfig["objects"] {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([objectId, config]) => [
+      objectId,
+      {
+        ...config,
+        regionAssignment: config.regionAssignment
+          ? {
+              mode: config.regionAssignment.mode === "manual" ? "manual" : "auto",
+              regionId:
+                typeof config.regionAssignment.regionId === "string" &&
+                config.regionAssignment.regionId.trim().length > 0
+                  ? config.regionAssignment.regionId
+                  : null,
+              initialized: config.regionAssignment.initialized === true,
+            }
+          : undefined,
+      },
+    ]),
+  );
 }
 
 export function saveEditorLocalConfig(

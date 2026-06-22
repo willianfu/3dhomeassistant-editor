@@ -1,11 +1,26 @@
-import { Cuboid, Folder, Search, Upload } from "lucide-react";
+import {
+  Cuboid,
+  Eye,
+  EyeOff,
+  Folder,
+  Map as MapIcon,
+  PencilLine,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import type { DragEvent, KeyboardEvent } from "react";
 import { useMemo, useRef, useState } from "react";
 import type { ModelLibraryItem } from "../../lib/model-library";
 import { flattenModelTree } from "../../lib/model-tree";
 import { cn } from "../../lib/utils";
 import { getVirtualRange } from "../../lib/virtual-list";
-import type { ModelTreeNode } from "../../types/editor";
+import type {
+  EditorRegion,
+  EditorRegionHighlightMode,
+  ModelTreeNode,
+} from "../../types/editor";
 import {
   Accordion,
   AccordionContent,
@@ -17,6 +32,14 @@ import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 const ROW_HEIGHT = 32;
@@ -25,14 +48,29 @@ const OVERSCAN = 8;
 type PartsTreeProps = {
   tree: ModelTreeNode | null;
   selectedIds: string[];
+  regions?: EditorRegion[];
+  selectedRegionId?: string | null;
+  regionDrawing?: boolean;
+  regionDraftPointCount?: number;
   modelLibraryItems: ModelLibraryItem[];
   onSelect: (uuid: string) => void;
+  onSelectRegion?: (regionId: string) => void;
+  onRenameRegion?: (regionId: string, name: string) => void;
+  onDeleteRegion?: (regionId: string) => void;
+  onToggleRegionVisibility?: (regionId: string, hidden: boolean) => void;
+  onRegionHighlightModeChange?: (
+    regionId: string,
+    highlightMode: EditorRegionHighlightMode,
+  ) => void;
+  onBeginRegionDraw?: () => void;
+  onFinishRegionDraw?: () => void;
+  onCancelRegionDraw?: () => void;
   onUploadClick: () => void;
   onAddLocalModelClick: () => void;
   onLoadSample: () => void;
   onAddLibraryModel: (item: ModelLibraryItem) => void;
   onBeginModelDrag: (event: DragEvent<HTMLElement>, item: ModelLibraryItem) => void;
-  defaultTab?: "parts" | "library";
+  defaultTab?: "parts" | "library" | "regions";
 };
 
 type ModelLibraryGroup = {
@@ -230,11 +268,247 @@ function ModelLibraryPanel({
   );
 }
 
+function RegionsPanel({
+  regions,
+  selectedRegionId,
+  drawing,
+  draftPointCount,
+  onBeginRegionDraw,
+  onFinishRegionDraw,
+  onCancelRegionDraw,
+  onSelectRegion,
+  onRenameRegion,
+  onDeleteRegion,
+  onToggleRegionVisibility,
+  onRegionHighlightModeChange,
+}: {
+  regions: EditorRegion[];
+  selectedRegionId: string | null;
+  drawing: boolean;
+  draftPointCount: number;
+  onBeginRegionDraw: () => void;
+  onFinishRegionDraw: () => void;
+  onCancelRegionDraw: () => void;
+  onSelectRegion: (regionId: string) => void;
+  onRenameRegion: (regionId: string, name: string) => void;
+  onDeleteRegion: (regionId: string) => void;
+  onToggleRegionVisibility: (regionId: string, hidden: boolean) => void;
+  onRegionHighlightModeChange: (
+    regionId: string,
+    highlightMode: EditorRegionHighlightMode,
+  ) => void;
+}) {
+  const selectedRegion = regions.find((region) => region.id === selectedRegionId) ?? null;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
+      <div className="rounded-md border border-border bg-background/55 p-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium">多边形区域</div>
+            <div className="mt-1 text-[10px] leading-4 text-muted-foreground">
+              顶视图绘制，闭合后保存为可管理区域。
+            </div>
+          </div>
+          <Button
+            type="button"
+            size="icon"
+            variant={drawing ? "default" : "secondary"}
+            aria-label="开始绘制多边形区域"
+            onClick={onBeginRegionDraw}
+          >
+            <PencilLine data-icon="icon" />
+          </Button>
+        </div>
+        {drawing ? (
+          <div className="mt-2 grid gap-2 rounded-md border border-primary/25 bg-primary/[0.08] p-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">已记录 {draftPointCount} 个点</span>
+              <span className="text-[10px] text-muted-foreground">右键取消</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={draftPointCount < 3}
+                onClick={onFinishRegionDraw}
+              >
+                完成区域绘制
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={onCancelRegionDraw}
+              >
+                <X data-icon="inline-start" />
+                取消区域绘制
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      {selectedRegion ? (
+        <div className="grid gap-2 rounded-md border border-border bg-secondary/30 p-2.5">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <label className="text-xs font-medium" htmlFor="region-name-input">
+              区域名称
+            </label>
+            <Badge variant={selectedRegion.hidden ? "outline" : "secondary"} className="h-5 px-1.5 text-[10px]">
+              {selectedRegion.hidden ? "已隐藏" : "显示中"}
+            </Badge>
+          </div>
+          <Input
+            id="region-name-input"
+            aria-label="区域名称"
+            value={selectedRegion.name}
+            onChange={(event) =>
+              onRenameRegion(selectedRegion.id, event.target.value)
+            }
+          />
+          <div className="grid gap-1.5">
+            <label className="text-xs font-medium" htmlFor="region-highlight-mode">
+              选中效果
+            </label>
+            <Select
+              value={selectedRegion.highlightMode ?? "edges"}
+              onValueChange={(value) =>
+                onRegionHighlightModeChange(
+                  selectedRegion.id,
+                  value as EditorRegionHighlightMode,
+                )
+              }
+            >
+              <SelectTrigger id="region-highlight-mode" aria-label="选中效果" className="h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="none">无效果</SelectItem>
+                  <SelectItem value="faces">无边高亮</SelectItem>
+                  <SelectItem value="edges">带边高亮</SelectItem>
+                  <SelectItem value="bottom">底面高亮</SelectItem>
+                  <SelectItem value="top">顶面高亮</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              aria-label={
+                selectedRegion.hidden
+                  ? `显示${selectedRegion.name}区域`
+                  : `隐藏${selectedRegion.name}区域`
+              }
+              onClick={() =>
+                onToggleRegionVisibility(selectedRegion.id, !selectedRegion.hidden)
+              }
+            >
+              {selectedRegion.hidden ? (
+                <Eye data-icon="inline-start" />
+              ) : (
+                <EyeOff data-icon="inline-start" />
+              )}
+              {selectedRegion.hidden ? "显示区域" : "隐藏区域"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+              aria-label="删除选中区域"
+              onClick={() => onDeleteRegion(selectedRegion.id)}
+            >
+              <Trash2 data-icon="inline-start" />
+              删除区域
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <ScrollArea className="min-h-0 flex-1 pr-2">
+        <div className="grid gap-1.5">
+          {regions.length === 0 ? (
+            <Card>
+              <CardContent className="p-3 text-center text-xs text-muted-foreground">
+                暂无区域，点击绘制按钮创建房间或功能区。
+              </CardContent>
+            </Card>
+          ) : (
+            regions.map((region) => (
+              <div
+                key={region.id}
+                className={cn(
+                  "flex min-w-0 items-center gap-1.5 rounded-md border p-1.5 transition-colors",
+                  selectedRegionId === region.id
+                    ? "border-primary/45 bg-primary/10"
+                    : "border-border bg-background/45 hover:border-primary/30",
+                  region.hidden && "opacity-70",
+                )}
+              >
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 min-w-0 flex-1 justify-start gap-2 px-1.5 text-xs hover:bg-transparent"
+                  onClick={() => onSelectRegion(region.id)}
+                >
+                  <MapIcon data-icon="inline-start" />
+                  <span className="min-w-0 flex-1 truncate">{region.name}</span>
+                  <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
+                    {region.points.length} 点
+                  </Badge>
+                  {region.hidden ? (
+                    <Badge variant="outline" className="shrink-0 px-1.5 text-[10px]">
+                      已隐藏
+                    </Badge>
+                  ) : null}
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  aria-label={
+                    region.hidden ? `显示${region.name}区域` : `隐藏${region.name}区域`
+                  }
+                  className="size-8 shrink-0"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleRegionVisibility(region.id, !region.hidden);
+                  }}
+                >
+                  {region.hidden ? <Eye data-icon="icon" /> : <EyeOff data-icon="icon" />}
+                </Button>
+              </div>
+            ))
+          )}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
 export function PartsTree({
   tree,
   selectedIds,
+  regions = [],
+  selectedRegionId = null,
+  regionDrawing = false,
+  regionDraftPointCount = 0,
   modelLibraryItems,
   onSelect,
+  onSelectRegion = () => undefined,
+  onRenameRegion = () => undefined,
+  onDeleteRegion = () => undefined,
+  onToggleRegionVisibility = () => undefined,
+  onRegionHighlightModeChange = () => undefined,
+  onBeginRegionDraw = () => undefined,
+  onFinishRegionDraw = () => undefined,
+  onCancelRegionDraw = () => undefined,
   onUploadClick,
   onAddLocalModelClick,
   onLoadSample,
@@ -266,9 +540,10 @@ export function PartsTree({
       </div>
       <Tabs defaultValue={defaultTab} className="min-h-0 flex-1">
         <div className="border-b border-border px-3 py-3">
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="parts">零件树</TabsTrigger>
             <TabsTrigger value="library">模型库</TabsTrigger>
+            <TabsTrigger value="regions">区域</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="parts" className="mt-0 h-[calc(100%-65px)]">
@@ -331,6 +606,22 @@ export function PartsTree({
             onAddLocalModelClick={onAddLocalModelClick}
             onAddLibraryModel={onAddLibraryModel}
             onBeginModelDrag={onBeginModelDrag}
+          />
+        </TabsContent>
+        <TabsContent value="regions" className="mt-0 h-[calc(100%-65px)]">
+          <RegionsPanel
+            regions={regions}
+            selectedRegionId={selectedRegionId}
+            drawing={regionDrawing}
+            draftPointCount={regionDraftPointCount}
+            onBeginRegionDraw={onBeginRegionDraw}
+            onFinishRegionDraw={onFinishRegionDraw}
+            onCancelRegionDraw={onCancelRegionDraw}
+            onSelectRegion={onSelectRegion}
+            onRenameRegion={onRenameRegion}
+            onDeleteRegion={onDeleteRegion}
+            onToggleRegionVisibility={onToggleRegionVisibility}
+            onRegionHighlightModeChange={onRegionHighlightModeChange}
           />
         </TabsContent>
       </Tabs>

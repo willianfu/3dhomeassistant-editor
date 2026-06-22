@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import type {
+  ObjectRegionAssignment,
+} from "../types/editor";
+import type {
   HaBinding,
   HaCoverCapabilityConfig,
   HaLightCapabilityConfig,
@@ -19,6 +22,7 @@ type HomeAssistantObjectData = {
     cover?: HaCoverCapabilityConfig;
     light?: HaLightCapabilityConfig;
   };
+  regionAssignment?: ObjectRegionAssignment;
 };
 
 function slugify(value: string) {
@@ -69,6 +73,39 @@ export function setManualDeviceType(
   deviceType: HaManualDeviceType,
 ) {
   getHomeAssistantData(object).deviceType = deviceType;
+}
+
+function normalizeRegionAssignment(
+  value: ObjectRegionAssignment | undefined,
+): ObjectRegionAssignment {
+  if (!value || typeof value !== "object") {
+    return { mode: "auto", regionId: null, initialized: false };
+  }
+  const regionId =
+    typeof value.regionId === "string" && value.regionId.trim().length > 0
+      ? value.regionId
+      : null;
+  if (value.mode === "manual") {
+    return { mode: "manual", regionId, initialized: false };
+  }
+  return {
+    mode: "auto",
+    regionId,
+    initialized: value.initialized === true,
+  };
+}
+
+export function getObjectRegionAssignment(
+  object: THREE.Object3D,
+): ObjectRegionAssignment {
+  return normalizeRegionAssignment(getHomeAssistantData(object).regionAssignment);
+}
+
+export function setObjectRegionAssignment(
+  object: THREE.Object3D,
+  assignment: ObjectRegionAssignment,
+) {
+  getHomeAssistantData(object).regionAssignment = normalizeRegionAssignment(assignment);
 }
 
 export function getLightCapabilityConfig(object: THREE.Object3D) {

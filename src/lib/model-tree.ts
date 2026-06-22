@@ -5,7 +5,12 @@ import type {
   SelectionTransformInfo,
   Vector3Values,
 } from "../types/editor";
-import { getHomeAssistantData, getModelObjectId, isModelGroup } from "./model-identity";
+import {
+  getHomeAssistantData,
+  getModelObjectId,
+  getObjectRegionAssignment,
+  isModelGroup,
+} from "./model-identity";
 
 function displayName(object: THREE.Object3D) {
   return object.name?.trim() || object.type || "Object";
@@ -62,6 +67,7 @@ export function getObjectMetadata(object: THREE.Object3D): ObjectMetadata {
   });
 
   const homeAssistantData = getHomeAssistantData(object);
+  const regionAssignment = getObjectRegionAssignment(object);
   return {
     id: object.uuid,
     objectId: homeAssistantData.objectId ?? null,
@@ -71,6 +77,8 @@ export function getObjectMetadata(object: THREE.Object3D): ObjectMetadata {
     bindings: homeAssistantData.bindings ?? [],
     coverCapability: homeAssistantData.capabilities?.cover ?? null,
     lightCapability: homeAssistantData.capabilities?.light ?? null,
+    regionAssignment,
+    resolvedRegionId: regionAssignment.regionId,
     name: displayName(object),
     type: object.type,
     parentName: object.parent ? displayName(object.parent) : null,

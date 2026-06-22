@@ -13,10 +13,11 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Redo2,
-  SquareDashedMousePointer,
   Sun,
   Undo2,
   Upload,
+  Volume2,
+  VolumeX,
   Wind,
   Zap,
 } from "lucide-react";
@@ -42,7 +43,7 @@ import {
   TooltipTrigger,
 } from "../ui/tooltip";
 
-type TopToolbarProps = {
+export type TopToolbarProps = {
   hasModel: boolean;
   isLoading: boolean;
   previewMode: boolean;
@@ -55,6 +56,7 @@ type TopToolbarProps = {
   haStatusMessage: string;
   weather: WeatherConfig;
   weatherStatus?: string | null;
+  weatherSoundEnabled: boolean;
   fullscreen: boolean;
   onUploadClick: () => void;
   onExport: () => void;
@@ -66,6 +68,7 @@ type TopToolbarProps = {
   onUndo: () => void;
   onRedo: () => void;
   onWeatherChange: (weather: WeatherConfig) => void;
+  onWeatherSoundToggle: () => void;
   onViewModeChange: (mode: ViewMode) => void;
   onToggleLeft: () => void;
   onToggleRight: () => void;
@@ -275,6 +278,37 @@ function WeatherMenu({
   );
 }
 
+function AuthorMenu() {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1 text-[11px] underline-offset-4 hover:bg-transparent hover:underline"
+        >
+          关于作者
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[320px]">
+        <div className="flex flex-col gap-3">
+          <div>
+            <div className="text-sm font-medium text-foreground">关于作者</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              本软件还在不断开发迭代，或有些许不足，会在日后逐渐完善提供更强的功能和更好的交互体验，也欢迎志同道合的朋友一起交流，微信：willainfu_
+            </p>
+          </div>
+          <img
+            src="/images/vx.jpg"
+            alt="作者微信二维码"
+            className="h-auto w-full rounded-md border border-border object-contain"
+          />
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function TopToolbar({
   hasModel,
   isLoading,
@@ -288,6 +322,7 @@ export function TopToolbar({
   haStatusMessage,
   weather,
   weatherStatus,
+  weatherSoundEnabled,
   fullscreen,
   onUploadClick,
   onExport,
@@ -299,6 +334,7 @@ export function TopToolbar({
   onUndo,
   onRedo,
   onWeatherChange,
+  onWeatherSoundToggle,
   onViewModeChange,
   onToggleLeft,
   onToggleRight,
@@ -316,8 +352,11 @@ export function TopToolbar({
             </IconButton>
           ) : null}
           <div className="min-w-0 px-2">
-            <div className="truncate text-sm font-semibold tracking-normal text-foreground">
-              3D 智能家居主控设计器
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="truncate text-sm font-semibold tracking-normal text-foreground">
+                3d智家中控
+              </div>
+              <AuthorMenu />
             </div>
             <div className="truncate text-xs text-muted-foreground">
               {previewMode ? "预览模式" : "GLB / GLTF / OBJ 模型编辑"}
@@ -337,6 +376,12 @@ export function TopToolbar({
             weatherStatus={weatherStatus}
             onChange={onWeatherChange}
           />
+          <IconButton
+            label={weatherSoundEnabled ? "关闭天气音效" : "开启天气音效"}
+            onClick={onWeatherSoundToggle}
+          >
+            {weatherSoundEnabled ? <Volume2 /> : <VolumeX />}
+          </IconButton>
           <IconButton
             label={fullscreen ? "退出全屏" : "全屏显示"}
             onClick={onToggleFullscreen}
@@ -394,19 +439,15 @@ export function TopToolbar({
                   ["perspective", "透视"],
                   ["top", "顶视"],
                   ["front", "正视"],
-                  ["side", "侧视"],
                 ] as const).map(([mode, label]) => (
                   <Button
                     key={mode}
                     variant={viewMode === mode ? "default" : "ghost"}
                     size="sm"
-                    className="h-7 px-2 text-xs"
+                    className="h-7 px-2.5 text-xs"
                     onClick={() => onViewModeChange(mode)}
                     disabled={!hasModel && mode !== "perspective"}
                   >
-                    {mode !== "perspective" ? (
-                      <SquareDashedMousePointer data-icon="inline-start" />
-                    ) : null}
                     {label}
                   </Button>
                 ))}

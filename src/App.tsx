@@ -4,6 +4,8 @@ import { PartsTree } from "./components/editor/PartsTree";
 import { RightInspector } from "./components/editor/RightInspector";
 import { HaBindingDialog } from "./components/editor/HaBindingDialog";
 import { HaFloatingPanel } from "./components/editor/HaFloatingPanel";
+import { type RegionDevicePanelItem } from "./components/editor/RegionDevicePanel";
+import { RegionSidePanel } from "./components/editor/RegionSidePanel";
 import { TopToolbar } from "./components/editor/TopToolbar";
 import { Viewport } from "./components/editor/Viewport";
 import { useHomeAssistant } from "./hooks/useHomeAssistant";
@@ -22,9 +24,11 @@ import {
   saveEditorLocalConfig,
   type EditorLocalConfig,
 } from "./lib/editor-local-config";
+import { normalizeEditorRegions } from "./lib/editor-regions";
 import { defaultHaRuntimeConfig, type HaRuntimeConfig } from "./lib/ha-config";
 import { cn } from "./lib/utils";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
+import { resolveWeatherSoundSource } from "./lib/weather-sound";
 import { fetchQWeatherNow } from "./lib/qweather";
 import { getSolarEnvironmentPreset } from "./lib/environment-lighting";
 import {
@@ -52,8 +56,11 @@ import type {
 } from "./types/ha";
 import type {
   EnvironmentConfig,
+  EditorRegion,
+  EditorRegionHighlightMode,
   ModelTreeNode,
   ObjectMetadata,
+  ObjectRegionAssignment,
   PerformanceConfig,
   PreviewCameraMode,
   SelectionTransformInfo,
@@ -171,7 +178,16 @@ export default function App() {
   const [weather, setWeather] = useState<WeatherConfig>(
     localConfigRef.current?.weather ?? defaultWeather,
   );
+  const [regions, setRegions] = useState<EditorRegion[]>(
+    localConfigRef.current?.regions ?? [],
+  );
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [regionDrawing, setRegionDrawing] = useState(false);
+  const [regionDraftPointCount, setRegionDraftPointCount] = useState(0);
+  const [regionListExpanded, setRegionListExpanded] = useState(true);
   const [weatherStatus, setWeatherStatus] = useState<string | null>(null);
+  const [weatherSoundEnabled, setWeatherSoundEnabled] = useState(false);
+  const weatherAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     const handleFullscreenChange = () => setFullscreen(isFullscreen());
@@ -191,8 +207,15 @@ export default function App() {
       return null;
     }
     const object = editor.getObject(selectedId);
-    return object ? getObjectMetadata(object) : null;
-  }, [editor, selectedIds, modelVersion, tree]);
+    if (!object) {
+      return null;
+    }
+    const objectMetadata = getObjectMetadata(object);
+    return {
+      ...objectMetadata,
+      resolvedRegionId: editor.getResolvedRegionIdForObject(selectedId),
+    };
+  }, [editor, selectedIds, modelVersion, tree, regions]);
 
   const selectionTransform: SelectionTransformInfo | null = useMemo(() => {
     if (!editor || selectedIds.length === 0) {
@@ -220,6 +243,23 @@ export default function App() {
         lightCapability: editor?.getLightCapabilityForObjects(panel.objectIds) ?? null,
       })),
     [editor, floatingPanels, modelVersion],
+  );
+
+  const activeRegion = useMemo(
+    () =>
+      regions.find((region) => region.id === selectedRegionId && !region.hidden) ??
+      null,
+    [regions, selectedRegionId],
+  );
+
+  const visibleRegions = useMemo(
+    () => regions.filter((region) => !region.hidden),
+    [regions],
+  );
+
+  const activeRegionDevices = useMemo<RegionDevicePanelItem[]>(
+    () => (editor && activeRegion ? editor.getRegionDevicePanelItems(activeRegion) : []),
+    [activeRegion, editor, modelVersion],
   );
 
   useEffect(() => {
@@ -299,6 +339,10 @@ export default function App() {
   }, [editor, weather]);
 
   useEffect(() => {
+    editor?.setRegions(regions, selectedRegionId);
+  }, [editor, regions, selectedRegionId]);
+
+  useEffect(() => {
     if (!(environment.realtimeTimeEnabled ?? true)) {
       return;
     }
@@ -368,6 +412,44 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    const audio = weatherAudioRef.current;
+    const soundSource = resolveWeatherSoundSource(weather.mode);
+
+    if (!weatherSoundEnabled || !soundSource) {
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+      return;
+    }
+
+    const activeAudio = audio ?? new Audio();
+    weatherAudioRef.current = activeAudio;
+    activeAudio.loop = true;
+
+    if (!activeAudio.src.endsWith(soundSource)) {
+      activeAudio.pause();
+      activeAudio.src = soundSource;
+      activeAudio.currentTime = 0;
+    }
+
+    void activeAudio.play().catch(() => {
+      // Browser autoplay policy can reject playback until the user clicks the sound toggle.
+    });
+  }, [weather.mode, weatherSoundEnabled]);
+
+  useEffect(
+    () => () => {
+      const audio = weatherAudioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.src = "";
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
     editor?.setViewMode(viewMode);
     if (viewMode === "perspective") {
       editor?.setEnvironment(environment);
@@ -406,17 +488,18 @@ export default function App() {
 
   useEffect(() => {
     const nextConfig =
-      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig) ?? {
+      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig, regions) ?? {
         version: 1,
         environment,
         performance: performanceConfig,
         weather,
         ha: haConfig,
+        regions,
         objects: localConfigRef.current?.objects ?? {},
       };
     localConfigRef.current = nextConfig;
     saveEditorLocalConfig(nextConfig);
-  }, [editor, environment, haConfig, modelVersion, performanceConfig, weather]);
+  }, [editor, environment, haConfig, modelVersion, performanceConfig, regions, weather]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -541,13 +624,21 @@ export default function App() {
       if (parsed.version !== 1 || !parsed.environment || !parsed.weather || !parsed.objects) {
         throw new Error("配置文件格式不正确。");
       }
-      localConfigRef.current = parsed;
-      saveEditorLocalConfig(parsed);
+      const nextConfig = {
+        ...parsed,
+        performance: normalizePerformanceConfig(parsed.performance),
+        ha: parsed.ha ?? defaultHaRuntimeConfig(),
+        regions: normalizeEditorRegions(parsed.regions),
+      };
+      localConfigRef.current = nextConfig;
+      saveEditorLocalConfig(nextConfig);
       setEnvironment({ ...defaultEnvironment, ...(parsed.environment ?? {}) });
-      setPerformanceConfig(normalizePerformanceConfig(parsed.performance));
+      setPerformanceConfig(nextConfig.performance);
       setWeather({ ...defaultWeather, ...(parsed.weather ?? {}) });
-      setHaConfig(parsed.ha ?? defaultHaRuntimeConfig());
-      editor?.applyLocalConfig(parsed);
+      setHaConfig(nextConfig.ha);
+      setRegions(nextConfig.regions);
+      setSelectedRegionId(null);
+      editor?.applyLocalConfig(nextConfig);
       refreshTree();
       setError(null);
     } catch (configError) {
@@ -653,7 +744,109 @@ export default function App() {
   };
 
   const handleSelect = (uuid: string) => {
+    setSelectedRegionId(null);
     editor?.selectObject(uuid);
+  };
+
+  const handleSelectionChange = (uuids: string[]) => {
+    setSelectedIds(uuids);
+    if (uuids.length > 0 || selectedRegionId) {
+      setSelectedRegionId(null);
+    }
+  };
+
+  const handleBeginRegionDraw = () => {
+    if (!editor) {
+      return;
+    }
+    setViewMode("top");
+    editor.setViewMode("top");
+    setSelectedRegionId(null);
+    setRegionListExpanded(true);
+    setRegionDrawing(true);
+    setRegionDraftPointCount(0);
+    editor.beginRegionDrawing();
+  };
+
+  const handleFinishRegionDraw = () => {
+    if (!editor) {
+      return;
+    }
+    const region = editor.completeRegionDrawing(`区域 ${regions.length + 1}`);
+    if (!region) {
+      return;
+    }
+    setRegions((current) => {
+      const next = [...current, region];
+      editor.setRegions(next, region.id);
+      editor.focusRegion(region.id);
+      return next;
+    });
+    setSelectedRegionId(region.id);
+    setRegionListExpanded(true);
+    setRegionDrawing(false);
+    setRegionDraftPointCount(0);
+  };
+
+  const handleCancelRegionDraw = () => {
+    editor?.cancelRegionDrawing();
+    setRegionDrawing(false);
+    setRegionDraftPointCount(0);
+  };
+
+  const handleSelectRegion = (regionId: string) => {
+    const region = regions.find((item) => item.id === regionId);
+    editor?.selectObject(null);
+    setSelectedRegionId(regionId);
+    setRegionListExpanded(true);
+    if (!region?.hidden) {
+      editor?.focusRegion(regionId);
+    } else {
+      editor?.setRegions(regions, null);
+    }
+  };
+
+  const handleRenameRegion = (regionId: string, name: string) => {
+    setRegions((current) =>
+      current.map((region) =>
+        region.id === regionId ? { ...region, name } : region,
+      ),
+    );
+  };
+
+  const handleToggleRegionVisibility = (regionId: string, hidden: boolean) => {
+    setRegions((current) => {
+      const next = current.map((region) =>
+        region.id === regionId ? { ...region, hidden } : region,
+      );
+      editor?.setRegions(next, hidden && selectedRegionId === regionId ? null : selectedRegionId);
+      return next;
+    });
+  };
+
+  const handleRegionHighlightModeChange = (
+    regionId: string,
+    highlightMode: EditorRegionHighlightMode,
+  ) => {
+    setRegions((current) => {
+      const next = current.map((region) =>
+        region.id === regionId ? { ...region, highlightMode } : region,
+      );
+      editor?.setRegions(next, selectedRegionId);
+      return next;
+    });
+  };
+
+  const handleDeleteRegion = (regionId: string) => {
+    setRegions((current) => {
+      const next = current.filter((region) => region.id !== regionId);
+      const nextSelectedRegionId = selectedRegionId === regionId ? null : selectedRegionId;
+      editor?.setRegions(next, nextSelectedRegionId);
+      return next;
+    });
+    if (selectedRegionId === regionId) {
+      setSelectedRegionId(null);
+    }
   };
 
   const handleExportModel = async (compressed = false) => {
@@ -675,7 +868,7 @@ export default function App() {
 
   const handleExportConfig = () => {
     const config =
-      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig) ??
+      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig, regions) ??
       localConfigRef.current ??
       {
         version: 1,
@@ -683,6 +876,7 @@ export default function App() {
         performance: performanceConfig,
         weather,
         ha: haConfig,
+        regions,
         objects: {},
       };
     const blob = new Blob([JSON.stringify(config, null, 2)], {
@@ -768,6 +962,11 @@ export default function App() {
     setModelVersion((version) => version + 1);
   };
 
+  const handleRegionAssignmentChange = (assignment: ObjectRegionAssignment) => {
+    editor?.updateRegionAssignmentForSelection(assignment);
+    setModelVersion((version) => version + 1);
+  };
+
   const handleBind = (binding: HaBinding) => {
     handleBindingsChange(addHaBinding(selectionBindings, binding));
     setBindingDialogOpen(false);
@@ -788,6 +987,7 @@ export default function App() {
         haStatusMessage={ha.statusMessage}
         weather={weather}
         weatherStatus={weatherStatus}
+        weatherSoundEnabled={weatherSoundEnabled}
         fullscreen={fullscreen}
         onUploadClick={handleUploadClick}
         onImportConfigClick={handleImportConfigClick}
@@ -811,6 +1011,7 @@ export default function App() {
           editor?.setViewMode(mode);
         }}
         onWeatherChange={setWeather}
+        onWeatherSoundToggle={() => setWeatherSoundEnabled((value) => !value)}
         onToggleLeft={() => setLeftCollapsed((value) => !value)}
         onToggleRight={() => setRightCollapsed((value) => !value)}
       />
@@ -848,7 +1049,19 @@ export default function App() {
           <PartsTree
             tree={tree}
             selectedIds={selectedIds}
+            regions={regions}
+            selectedRegionId={selectedRegionId}
+            regionDrawing={regionDrawing}
+            regionDraftPointCount={regionDraftPointCount}
             onSelect={handleSelect}
+            onSelectRegion={handleSelectRegion}
+            onRenameRegion={handleRenameRegion}
+            onDeleteRegion={handleDeleteRegion}
+            onToggleRegionVisibility={handleToggleRegionVisibility}
+            onRegionHighlightModeChange={handleRegionHighlightModeChange}
+            onBeginRegionDraw={handleBeginRegionDraw}
+            onFinishRegionDraw={handleFinishRegionDraw}
+            onCancelRegionDraw={handleCancelRegionDraw}
             onUploadClick={handleUploadClick}
             onAddLocalModelClick={handleLibraryUploadClick}
             onLoadSample={handleLoadSample}
@@ -860,13 +1073,14 @@ export default function App() {
         <Viewport
           performance={performanceConfig}
           onReady={setEditor}
-          onSelectionChange={setSelectedIds}
+          onSelectionChange={handleSelectionChange}
           onModelChange={() => setModelVersion((version) => version + 1)}
           onHistoryChange={setHistoryState}
           onLoadProgress={() => undefined}
           onObjectContextMenu={(event) =>
             setObjectMenu({ x: event.clientX, y: event.clientY, uuid: event.uuid })
           }
+          onRegionDraftChange={setRegionDraftPointCount}
           canDropModel={canDropLibraryModel}
           onModelDrop={(dataTransfer, point) =>
             void handleViewportDrop(dataTransfer, point)
@@ -875,7 +1089,20 @@ export default function App() {
           error={error}
           viewMode={viewMode}
           previewMode={previewMode}
-        />
+        >
+          <RegionSidePanel
+            regions={visibleRegions}
+            selectedRegionId={selectedRegionId}
+            expanded={regionListExpanded}
+            devices={activeRegionDevices}
+            states={ha.states}
+            onToggleExpanded={() => setRegionListExpanded((expanded) => !expanded)}
+            onSelectRegion={handleSelectRegion}
+            onCall={(entityId, service, serviceData) =>
+              void ha.callEntity(entityId, service, serviceData)
+            }
+          />
+        </Viewport>
         {objectMenu && !previewMode ? (
           <div
             className="fixed z-40 grid min-w-[120px] gap-1 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-xl"
@@ -930,11 +1157,13 @@ export default function App() {
             onSizeChange={handleSizeChange}
             onCenterChange={handleCenterChange}
             onUniformScale={handleUniformScale}
+            regions={regions}
             onOpenBindingDialog={() => setBindingDialogOpen(true)}
             onBindingsChange={handleBindingsChange}
             onCoverCapabilityChange={handleCoverCapabilityChange}
             onLightCapabilityChange={handleLightCapabilityChange}
             onManualDeviceTypeChange={handleManualDeviceTypeChange}
+            onRegionAssignmentChange={handleRegionAssignmentChange}
             haStates={ha.states}
             onGroupSelected={handleGroupSelected}
             onDeleteSelected={handleDeleteSelected}

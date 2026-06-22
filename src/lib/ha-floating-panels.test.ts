@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   closeHaFloatingPanel,
+  shouldUpdateFloatingPanelAnchors,
   openHaFloatingPanel,
   removeMissingHaFloatingPanels,
 } from "./ha-floating-panels";
@@ -42,5 +43,44 @@ describe("ha-floating-panels", () => {
     expect(removeMissingHaFloatingPanels(panels, new Set(["fan"]))).toEqual([
       { id: "fan", objectIds: ["fan"] },
     ]);
+  });
+
+  it("keeps the same panel array reference when no targets are removed", () => {
+    const panels = [
+      { id: "lamp", objectIds: ["lamp"] },
+      { id: "fan", objectIds: ["fan"] },
+    ];
+
+    expect(removeMissingHaFloatingPanels(panels, new Set(["lamp", "fan"]))).toBe(
+      panels,
+    );
+  });
+
+  it("throttles anchor updates during camera movement", () => {
+    expect(
+      shouldUpdateFloatingPanelAnchors({
+        now: 1010,
+        lastUpdateTime: 1000,
+        intervalMs: 50,
+      }),
+    ).toBe(false);
+    expect(
+      shouldUpdateFloatingPanelAnchors({
+        now: 1050,
+        lastUpdateTime: 1000,
+        intervalMs: 50,
+      }),
+    ).toBe(true);
+  });
+
+  it("allows a forced anchor update when panels change", () => {
+    expect(
+      shouldUpdateFloatingPanelAnchors({
+        now: 1010,
+        lastUpdateTime: 1000,
+        intervalMs: 50,
+        force: true,
+      }),
+    ).toBe(true);
   });
 });

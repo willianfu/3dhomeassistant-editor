@@ -10,8 +10,10 @@ import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUnifo
 import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import type {
   EnvironmentConfig,
+  EditorRegion,
   PerformanceConfig,
   PreviewCameraMode,
+  RegionPoint,
   RenderBackend,
   RenderQuality,
   Vector3Values,
@@ -70,6 +72,10 @@ import {
   resolveSymmetricalCoverTargetMode,
 } from "./ha-capabilities/cover";
 import { getBoundEntityIds } from "./ha-bindings";
+import {
+  getEditorRegionBounds,
+  isPointInEditorRegion,
+} from "./editor-regions";
 import { groupObjectsPreservingWorldTransform } from "./model-grouping";
 import {
   assignFreshModelObjectIds,
@@ -77,22 +83,32 @@ import {
   getCoverCapabilityConfig,
   getModelObjectId,
   getLightCapabilityConfig,
+  getObjectRegionAssignment,
   setManualDeviceType,
   getObjectBindings,
   setCoverCapabilityConfig,
   setLightCapabilityConfig,
+  setObjectRegionAssignment,
   setObjectBindings,
   syncAllCoverTargetBindings,
   syncCoverTargetBindings,
 } from "./model-identity";
 import { computeOrthoFrustum } from "./ortho-frustum";
 import { removeOwnedElement } from "./owned-dom";
+import {
+  enhanceMaterialForRole,
+  resolveRealisticMaterialRole,
+} from "./realistic-materials";
 import { getResizeRatios, scalePointAroundCenter } from "./selection-transform";
+import { computeDirectionalShadowBounds } from "./shadow-bounds";
 import { resolveSelectableObject } from "./selectable-object";
 import { disposeObjectTree } from "./three-dispose";
 import { getViewControlMode } from "./view-controls";
 import { isVerticalWallLikeBox } from "./wall-visibility";
-import { getRenderQualityProfile } from "./render-quality";
+import {
+  getRenderQualityProfile,
+  resolveToneMappingExposure,
+} from "./render-quality";
 import { withTimeout } from "./with-timeout";
 import {
   createRainLineEffect,
@@ -106,8 +122,10 @@ import {
 export type ThreeEditorOptions = {
   renderBackend?: RenderBackend;
   quality?: RenderQuality;
+  realisticRenderingEnabled?: boolean;
   onSelectionChange?: (uuids: string[]) => void;
   onObjectContextMenu?: (event: { clientX: number; clientY: number; uuid: string }) => void;
+  onRegionDraftChange?: (pointCount: number) => void;
   onModelChange?: () => void;
   onHistoryChange?: (state: EditorHistoryState) => void;
   onLoadProgress?: (progress: number) => void;
@@ -174,6 +192,7 @@ type WeatherBounds = {
 };
 
 type PreviewCameraTransition = {
+  camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   startTime: number;
   duration: number;
   fromPosition: THREE.Vector3;
@@ -181,6 +200,8 @@ type PreviewCameraTransition = {
   fromTarget: THREE.Vector3;
   toTarget: THREE.Vector3;
 };
+
+const REGION_CLOSE_THRESHOLD = 0.35;
 
 function colorTemperatureToColor(kelvin: number) {
   const temperature = THREE.MathUtils.clamp(kelvin, 1000, 12000) / 100;
@@ -238,6 +259,10 @@ export class ThreeEditor {
   private modelRoot: THREE.Object3D | null = null;
   private objectMap = new Map<string, THREE.Object3D>();
   private originalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
+  private realisticOriginalMaterials = new Map<
+    string,
+    THREE.Material | THREE.Material[]
+  >();
   private haLights = new Map<string, HaLightRig>();
   private haCoverAnimations = new Map<string, HaCoverAnimation>();
   private haCoverLastFrameTime = 0;
@@ -245,6 +270,13 @@ export class ThreeEditor {
   private wallOriginalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private weatherConfig: WeatherConfig = defaultWeather;
   private weatherGroup = new THREE.Group();
+  private regionGroup = new THREE.Group();
+  private regionDraftGroup = new THREE.Group();
+  private regions: EditorRegion[] = [];
+  private selectedRegionId: string | null = null;
+  private regionDrawingEnabled = false;
+  private regionDraftPoints: RegionPoint[] = [];
+  private regionDraftHoverPoint: RegionPoint | null = null;
   private weatherRain: RainLineEffect | null = null;
   private weatherWind: WindLineEffect | null = null;
   private weatherClouds: WeatherCloud[] = [];
@@ -256,6 +288,7 @@ export class ThreeEditor {
   private weatherLightningBurstFrames = 0;
   private weatherLightningCooldownFrames = 0;
   private lastFrameTime = 0;
+  private generatedEnvironmentMap: THREE.Texture | null = null;
   private fpsMeter = new FpsMeter();
   private selectedIds = new Set<string>();
   private selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x29d3c4);
@@ -276,6 +309,9 @@ export class ThreeEditor {
   private dragBoxElement: HTMLDivElement | null = null;
   private destroyed = false;
   private lastSize = { width: 0, height: 0 };
+  private handleContextMenuListener = (event: MouseEvent) => {
+    this.handleContextMenu(event);
+  };
 
   constructor(container: HTMLElement, options: ThreeEditorOptions = {}) {
     this.container = container;
@@ -283,6 +319,8 @@ export class ThreeEditor {
     this.performanceConfig = {
       renderBackend: options.renderBackend ?? defaultPerformance.renderBackend,
       quality: options.quality ?? defaultPerformance.quality,
+      realisticRenderingEnabled:
+        options.realisticRenderingEnabled ?? defaultPerformance.realisticRenderingEnabled,
     };
     this.dracoLoader = new DRACOLoader();
     this.dracoLoader.setDecoderPath("/draco/");
@@ -300,6 +338,7 @@ export class ThreeEditor {
     this.renderer.setClearColor(0x0b1017, 1);
     this.renderer.domElement.className = "h-full w-full outline-none";
     this.container.appendChild(this.renderer.domElement);
+    this.updateRealisticRendering();
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
     this.camera.position.set(7, 6, 8);
@@ -347,6 +386,9 @@ export class ThreeEditor {
     this.scene.add(this.ambient, this.directional);
     this.weatherGroup.name = "weather simulation";
     this.scene.add(this.weatherGroup);
+    this.regionGroup.name = "editor regions";
+    this.regionDraftGroup.name = "editor region draft";
+    this.scene.add(this.regionGroup, this.regionDraftGroup);
 
     this.selectionBox.visible = false;
     this.selectionBox.material.depthTest = false;
@@ -358,7 +400,10 @@ export class ThreeEditor {
 
     this.renderer.domElement.addEventListener("pointerdown", this.handlePointerDown);
     this.renderer.domElement.addEventListener("pointermove", this.handlePointerMove);
-    this.renderer.domElement.addEventListener("contextmenu", this.handleContextMenu);
+    this.renderer.domElement.addEventListener(
+      "contextmenu",
+      this.handleContextMenuListener,
+    );
     window.addEventListener("pointerup", this.handlePointerUp);
     this.animate();
   }
@@ -382,14 +427,21 @@ export class ThreeEditor {
   }
 
   setPerformanceConfig(config: PerformanceConfig) {
+    const realisticRenderingChanged =
+      this.performanceConfig.realisticRenderingEnabled !==
+      (config.realisticRenderingEnabled === true);
     this.performanceConfig = {
       renderBackend:
         config.renderBackend === "webgpu" || config.renderBackend === "webgl"
           ? config.renderBackend
           : defaultPerformance.renderBackend,
       quality: config.quality ?? defaultPerformance.quality,
+      realisticRenderingEnabled: config.realisticRenderingEnabled === true,
     };
     this.applyRenderQuality();
+    if (realisticRenderingChanged) {
+      this.updateRealisticRendering();
+    }
   }
 
   private applyRenderQuality() {
@@ -418,6 +470,61 @@ export class ThreeEditor {
     this.directional.shadow.needsUpdate = true;
   }
 
+  private applyStudioEnvironment() {
+    if (this.generatedEnvironmentMap) {
+      this.generatedEnvironmentMap.dispose();
+    }
+    const faces = [
+      this.createEnvironmentFace("#d7e5f2", "#edf5ff"),
+      this.createEnvironmentFace("#202936", "#566a7d"),
+      this.createEnvironmentFace("#f4ead8", "#d5b98f"),
+      this.createEnvironmentFace("#141a22", "#283443"),
+      this.createEnvironmentFace("#b8d0e8", "#fbf7ee"),
+      this.createEnvironmentFace("#1b2430", "#53616f"),
+    ];
+    const texture = new THREE.CubeTexture(faces);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    this.generatedEnvironmentMap = texture;
+    this.scene.environment = texture;
+    this.scene.environmentIntensity = 0.68;
+  }
+
+  private clearStudioEnvironment() {
+    this.scene.environment = null;
+    this.scene.environmentIntensity = 1;
+    this.generatedEnvironmentMap?.dispose();
+    this.generatedEnvironmentMap = null;
+  }
+
+  private updateRealisticRendering() {
+    if (this.performanceConfig.realisticRenderingEnabled) {
+      this.applyStudioEnvironment();
+      if (this.modelRoot) {
+        this.prepareModel(this.modelRoot);
+      }
+      return;
+    }
+    this.clearStudioEnvironment();
+    this.restoreRealisticMaterials();
+  }
+
+  private createEnvironmentFace(topColor: string, bottomColor: string) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return canvas;
+    }
+    const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+    gradient.addColorStop(0, topColor);
+    gradient.addColorStop(1, bottomColor);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
   dispose() {
     this.destroyed = true;
     cancelAnimationFrame(this.animationFrame);
@@ -431,16 +538,20 @@ export class ThreeEditor {
     );
     this.renderer?.domElement.removeEventListener(
       "contextmenu",
-      this.handleContextMenu,
+      this.handleContextMenuListener,
     );
     window.removeEventListener("pointerup", this.handlePointerUp);
     this.restoreWallTransparency();
     this.clearWeatherEffects();
+    this.clearRegionObjects();
+    this.clearRegionDraftObjects();
     this.clearHaPanelMarkers();
     if (this.modelRoot) {
       disposeObjectTree(this.modelRoot);
     }
     this.clearHaLights();
+    this.generatedEnvironmentMap?.dispose();
+    this.generatedEnvironmentMap = null;
     this.grid.geometry.dispose();
     this.selectionBox.geometry.dispose();
     this.clearMultiSelectionHelpers();
@@ -566,6 +677,79 @@ export class ThreeEditor {
     return this.objectMap.get(uuid) ?? null;
   }
 
+  setRegions(regions: EditorRegion[], selectedRegionId: string | null = this.selectedRegionId) {
+    const hadSelectedRegion = Boolean(this.selectedRegionId);
+    this.regions = regions;
+    this.selectedRegionId =
+      selectedRegionId &&
+      regions.some((region) => region.id === selectedRegionId && !region.hidden)
+        ? selectedRegionId
+        : null;
+    this.rebuildRegionObjects();
+    if (hadSelectedRegion && !this.selectedRegionId) {
+      this.restoreOrbitTargetToGridCenter();
+    }
+  }
+
+  beginRegionDrawing() {
+    this.regionDrawingEnabled = true;
+    this.regionDraftPoints = [];
+    this.regionDraftHoverPoint = null;
+    this.updateRegionDraftObjects();
+    this.options.onRegionDraftChange?.(0);
+  }
+
+  cancelRegionDrawing() {
+    this.regionDrawingEnabled = false;
+    this.regionDraftPoints = [];
+    this.regionDraftHoverPoint = null;
+    this.updateRegionDraftObjects();
+    this.options.onRegionDraftChange?.(0);
+  }
+
+  completeRegionDrawing(name: string) {
+    if (this.regionDraftPoints.length < 4) {
+      return null;
+    }
+    const firstPoint = this.regionDraftPoints[0];
+    const lastPoint = this.regionDraftPoints[this.regionDraftPoints.length - 1];
+    const closedDistance = Math.hypot(
+      lastPoint.x - firstPoint.x,
+      lastPoint.z - firstPoint.z,
+    );
+    if (closedDistance > REGION_CLOSE_THRESHOLD) {
+      return null;
+    }
+    const polygonPoints = this.regionDraftPoints.slice(0, -1);
+    const region: EditorRegion = {
+      id: `region-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: name.trim() || "未命名区域",
+      highlightMode: "edges",
+      points: polygonPoints.map((point) => ({ ...point })),
+    };
+    this.regionDrawingEnabled = false;
+    this.regionDraftPoints = [];
+    this.regionDraftHoverPoint = null;
+    this.updateRegionDraftObjects();
+    this.options.onRegionDraftChange?.(0);
+    return region;
+  }
+
+  getRegionDraftPointCount() {
+    return this.regionDraftPoints.length;
+  }
+
+  focusRegion(regionId: string) {
+    const region = this.regions.find((item) => item.id === regionId);
+    if (!region || region.hidden) {
+      return false;
+    }
+    this.selectedRegionId = region.id;
+    this.rebuildRegionObjects();
+    this.focusCameraOnRegion(region);
+    return true;
+  }
+
   getDebugState() {
     const rootBox = this.modelRoot
       ? new THREE.Box3().setFromObject(this.modelRoot)
@@ -620,6 +804,9 @@ export class ThreeEditor {
       return false;
     }
     this.selectedIds.clear();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.rebuildObjectMap();
     this.updateSelectionBox();
     this.updateTransformControls();
@@ -654,6 +841,9 @@ export class ThreeEditor {
     clone.position.x += Math.max(size.x * 0.18, 0.2);
     clone.position.z += Math.max(size.z * 0.18, 0.2);
     this.prepareModel(clone);
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.rebuildObjectMap();
     this.selectedIds = new Set([clone.uuid]);
     this.updateSelectionBox();
@@ -664,6 +854,9 @@ export class ThreeEditor {
       label: "复制模型",
       undo: () => {
         clone.parent?.remove(clone);
+        if (this.modelRoot) {
+          this.updateDirectionalShadowBounds(this.modelRoot);
+        }
         this.rebuildObjectMap();
         this.selectedIds = new Set(beforeSelectedIds.filter((id) => this.objectMap.has(id)));
         this.updateSelectionBox();
@@ -673,6 +866,9 @@ export class ThreeEditor {
       },
       redo: () => {
         parent.add(clone);
+        if (this.modelRoot) {
+          this.updateDirectionalShadowBounds(this.modelRoot);
+        }
         this.rebuildObjectMap();
         this.selectedIds = new Set([clone.uuid]);
         this.updateSelectionBox();
@@ -695,6 +891,9 @@ export class ThreeEditor {
     object.position.set(position.x, position.y, position.z);
     this.updateSelectionBox();
     this.updateTransformControls();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.options.onModelChange?.();
     this.pushTransformHistory("移动零件", before, this.captureSnapshots([object]));
   }
@@ -713,6 +912,9 @@ export class ThreeEditor {
     );
     this.updateSelectionBox();
     this.updateTransformControls();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.options.onModelChange?.();
     this.pushTransformHistory("缩放零件", before, this.captureSnapshots(objects));
   }
@@ -736,6 +938,9 @@ export class ThreeEditor {
       },
     );
     this.scaleSelectionAroundCenter(objects, center, ratios);
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.pushTransformHistory("调整尺寸", before, this.captureSnapshots(objects));
   }
 
@@ -762,6 +967,9 @@ export class ThreeEditor {
     }
     this.updateSelectionBox();
     this.updateTransformControls();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.options.onModelChange?.();
     this.pushTransformHistory("移动中心点", before, this.captureSnapshots(objects));
   }
@@ -782,6 +990,9 @@ export class ThreeEditor {
       box.getCenter(new THREE.Vector3()),
       { x: multiplier, y: multiplier, z: multiplier },
     );
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
     this.pushTransformHistory("等比缩放", before, this.captureSnapshots(objects));
   }
 
@@ -878,11 +1089,19 @@ export class ThreeEditor {
     weather: WeatherConfig,
     ha: HaRuntimeConfig,
     performance: PerformanceConfig,
+    regions: EditorRegion[] = this.regions,
   ) {
     if (!this.modelRoot) {
       return null;
     }
-    return createEditorLocalConfig(this.modelRoot, environment, weather, ha, performance);
+    return createEditorLocalConfig(
+      this.modelRoot,
+      environment,
+      weather,
+      ha,
+      performance,
+      regions,
+    );
   }
 
   applyLocalConfig(config: EditorLocalConfig | null) {
@@ -932,6 +1151,102 @@ export class ThreeEditor {
       }
     }
     return null;
+  }
+
+  getResolvedRegionIdForObject(objectId: string) {
+    const object = this.objectMap.get(objectId);
+    return object ? this.resolveObjectRegionId(object) : null;
+  }
+
+  updateRegionAssignmentForSelection(
+    assignment: ReturnType<typeof getObjectRegionAssignment>,
+  ) {
+    const objects = this.getSelectedObjects();
+    if (objects.length === 0) {
+      return;
+    }
+    for (const object of objects) {
+      setObjectRegionAssignment(object, assignment);
+    }
+    this.options.onModelChange?.();
+  }
+
+  private getValidRegionIds(regions: EditorRegion[] = this.regions ?? []) {
+    return new Set(regions.map((region) => region.id));
+  }
+
+  private findRegionIdAtObjectPosition(
+    object: THREE.Object3D,
+    regions: EditorRegion[] = this.regions ?? [],
+  ) {
+    if (regions.length === 0) {
+      return null;
+    }
+    object.updateWorldMatrix(true, false);
+    const position = object.getWorldPosition(new THREE.Vector3());
+    const region = regions.find(
+      (item) =>
+        !item.hidden &&
+        isPointInEditorRegion({ x: position.x, z: position.z }, item),
+    );
+    return region?.id ?? null;
+  }
+
+  private resolveObjectRegionId(
+    object: THREE.Object3D,
+    regions: EditorRegion[] = this.regions ?? [],
+  ) {
+    const validRegionIds = this.getValidRegionIds(regions);
+    const assignment = getObjectRegionAssignment(object);
+    if (
+      assignment.mode === "manual" &&
+      assignment.regionId &&
+      validRegionIds.has(assignment.regionId)
+    ) {
+      return assignment.regionId;
+    }
+    if (
+      assignment.mode === "auto" &&
+      assignment.initialized &&
+      (!assignment.regionId || validRegionIds.has(assignment.regionId))
+    ) {
+      return assignment.regionId;
+    }
+    if (regions.length === 0) {
+      setObjectRegionAssignment(object, {
+        mode: "auto",
+        regionId: null,
+        initialized: false,
+      });
+      return null;
+    }
+    const regionId = this.findRegionIdAtObjectPosition(object, regions);
+    setObjectRegionAssignment(object, {
+      mode: "auto",
+      regionId,
+      initialized: true,
+    });
+    return regionId;
+  }
+
+  getRegionDevicePanelItems(region: EditorRegion) {
+    const regions = this.regions?.length ? this.regions : [region];
+    return [...this.objectMap.values()]
+      .filter((object) => object !== this.modelRoot)
+      .map((object) => {
+        const bindings = getObjectBindings(object);
+        return { object, bindings };
+      })
+      .filter(({ bindings }) => getBoundEntityIds(bindings).length > 0)
+      .filter(({ object }) => this.resolveObjectRegionId(object, regions) === region.id)
+      .map(({ object, bindings }) => ({
+        id: object.uuid,
+        name: object.name?.trim() || getModelObjectId(object) || object.type,
+        objectIds: [object.uuid],
+        bindings,
+        coverCapability: getCoverCapabilityConfig(object),
+        lightCapability: getLightCapabilityConfig(object),
+      }));
   }
 
   updateCoverCapabilityForSelection(config: HaCoverCapabilityConfig) {
@@ -1247,6 +1562,7 @@ export class ThreeEditor {
     this.clearHaLights();
     this.clearHaPanelMarkers();
     this.originalMaterials.clear();
+    this.realisticOriginalMaterials.clear();
     if (this.modelRoot) {
       this.scene.remove(this.modelRoot);
       disposeObjectTree(this.modelRoot);
@@ -1381,6 +1697,7 @@ export class ThreeEditor {
     this.prepareModel(object);
     this.placeAddedModelObject(object, placement);
     root.add(object);
+    this.updateDirectionalShadowBounds(root);
     this.rebuildObjectMap();
     this.setViewMode(this.viewMode);
     this.rebuildWeatherEffects();
@@ -1389,6 +1706,7 @@ export class ThreeEditor {
       label: "添加模型",
       undo: () => {
         object.parent?.remove(object);
+        this.updateDirectionalShadowBounds(root);
         this.rebuildObjectMap();
         this.selectObject(null);
         this.rebuildWeatherEffects();
@@ -1396,6 +1714,7 @@ export class ThreeEditor {
       },
       redo: () => {
         root.add(object);
+        this.updateDirectionalShadowBounds(root);
         this.rebuildObjectMap();
         this.selectObject(object.uuid);
         this.rebuildWeatherEffects();
@@ -1411,12 +1730,16 @@ export class ThreeEditor {
     root.traverse((node) => {
       if ((node as THREE.Mesh).isMesh) {
         const mesh = node as THREE.Mesh;
-        mesh.castShadow = false;
+        mesh.castShadow = true;
         mesh.receiveShadow = true;
-        mesh.material = this.ensureLightReactiveMaterial(mesh.material);
+        const lightReactiveMaterial = this.ensureLightReactiveMaterial(mesh.material);
+        mesh.material = this.performanceConfig.realisticRenderingEnabled
+          ? this.enhanceRealisticMaterialSet(mesh, lightReactiveMaterial)
+          : lightReactiveMaterial;
         mesh.userData.selectable = true;
       }
     });
+    this.updateDirectionalShadowBounds(root);
   }
 
   private ensureHaCoverAnimation(
@@ -1821,6 +2144,75 @@ export class ThreeEditor {
     return material;
   }
 
+  private enhanceRealisticMaterialSet(
+    mesh: THREE.Mesh,
+    material: THREE.Material | THREE.Material[],
+  ): THREE.Material | THREE.Material[] {
+    this.realisticOriginalMaterials ??= new Map();
+    if (!this.realisticOriginalMaterials.has(mesh.uuid)) {
+      this.realisticOriginalMaterials.set(mesh.uuid, material);
+    }
+    if (Array.isArray(material)) {
+      return material.map((entry) => this.enhanceRealisticMaterial(mesh, entry));
+    }
+    return this.enhanceRealisticMaterial(mesh, material);
+  }
+
+  private enhanceRealisticMaterial(mesh: THREE.Mesh, material: THREE.Material) {
+    if (material.userData.realisticEnhanced) {
+      return material;
+    }
+    const role = resolveRealisticMaterialRole(mesh.name, material.name);
+    if (!role) {
+      material.userData.realisticEnhanced = true;
+      return material;
+    }
+    const enhanced = enhanceMaterialForRole(material, role);
+    enhanced.userData = { ...material.userData, realisticEnhanced: true, realisticRole: role };
+    return enhanced;
+  }
+
+  private restoreRealisticMaterials() {
+    this.realisticOriginalMaterials ??= new Map();
+    if (!this.modelRoot || this.realisticOriginalMaterials.size === 0) {
+      return;
+    }
+    this.modelRoot.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!mesh.isMesh) {
+        return;
+      }
+      const original = this.realisticOriginalMaterials.get(mesh.uuid);
+      if (!original) {
+        return;
+      }
+      const currentMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of currentMaterials) {
+        if (material !== original && !(Array.isArray(original) && original.includes(material))) {
+          material.dispose();
+        }
+      }
+      mesh.material = original;
+      this.realisticOriginalMaterials.delete(mesh.uuid);
+    });
+  }
+
+  private updateDirectionalShadowBounds(root: THREE.Object3D) {
+    const box = new THREE.Box3().setFromObject(root);
+    if (box.isEmpty()) {
+      return;
+    }
+    const bounds = computeDirectionalShadowBounds(box);
+    this.directional.shadow.camera.left = bounds.left;
+    this.directional.shadow.camera.right = bounds.right;
+    this.directional.shadow.camera.top = bounds.top;
+    this.directional.shadow.camera.bottom = bounds.bottom;
+    this.directional.shadow.camera.near = bounds.near;
+    this.directional.shadow.camera.far = bounds.far;
+    this.directional.shadow.camera.updateProjectionMatrix();
+    this.directional.shadow.needsUpdate = true;
+  }
+
   private rebuildObjectMap() {
     this.objectMap.clear();
     this.modelRoot?.traverse((node) => {
@@ -1877,12 +2269,424 @@ export class ThreeEditor {
       .add(currentDirection.multiplyScalar(distance));
     toPosition.y = Math.max(toPosition.y, center.y + minHeight);
     this.previewCameraTransition = {
+      camera: this.camera,
       startTime: performance.now(),
       duration: 850,
       fromPosition: this.camera.position.clone(),
       toPosition,
       fromTarget: this.controls.target.clone(),
       toTarget: center,
+    };
+  }
+
+  private getRegionVisualY() {
+    if (!this.modelRoot) {
+      return 0.035;
+    }
+    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    if (box.isEmpty()) {
+      return 0.035;
+    }
+    return box.max.y + 0.035;
+  }
+
+  private clearRegionObjects() {
+    for (const child of [...this.regionGroup.children]) {
+      this.regionGroup.remove(child);
+      disposeObjectTree(child);
+    }
+  }
+
+  private clearRegionDraftObjects() {
+    for (const child of [...this.regionDraftGroup.children]) {
+      this.regionDraftGroup.remove(child);
+      disposeObjectTree(child);
+    }
+  }
+
+  private createRegionFill(
+    region: EditorRegion,
+    y: number,
+    selected: boolean,
+    layer: "top" | "bottom" | "surface" = "surface",
+  ) {
+    const shape = new THREE.Shape(
+      region.points.map((point) => new THREE.Vector2(point.x, point.z)),
+    );
+    const geometry = new THREE.ShapeGeometry(shape);
+    geometry.rotateX(Math.PI / 2);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x29d3c4,
+      transparent: true,
+      opacity: selected ? 0.16 : 0.08,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.y = y;
+    mesh.renderOrder = selected ? 22 : 20;
+    mesh.userData.selectable = false;
+    mesh.userData.regionFaceLayer = layer;
+    return mesh;
+  }
+
+  private createRegionLine(
+    points: RegionPoint[],
+    y: number,
+    options: {
+      closed: boolean;
+      color?: number;
+      opacity?: number;
+      radius?: number;
+    },
+  ) {
+    const curve = new THREE.CurvePath<THREE.Vector3>();
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const current = points[index];
+      const next = points[index + 1];
+      curve.add(
+        new THREE.LineCurve3(
+          new THREE.Vector3(current.x, y, current.z),
+          new THREE.Vector3(next.x, y, next.z),
+        ),
+      );
+    }
+    if (options.closed && points.length > 2) {
+      const last = points[points.length - 1];
+      const first = points[0];
+      curve.add(
+        new THREE.LineCurve3(
+          new THREE.Vector3(last.x, y, last.z),
+          new THREE.Vector3(first.x, y, first.z),
+        ),
+      );
+    }
+    const material = new THREE.MeshBasicMaterial({
+      color: options.color ?? 0x29d3c4,
+      transparent: true,
+      opacity: options.opacity ?? 0.72,
+      depthWrite: false,
+    });
+    if (curve.curves.length === 0) {
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(options.radius ?? 0.045, 10, 8), material);
+      marker.position.set(points[0]?.x ?? 0, y, points[0]?.z ?? 0);
+      marker.renderOrder = 24;
+      marker.userData.selectable = false;
+      return marker;
+    }
+    const geometry = new THREE.TubeGeometry(
+      curve,
+      Math.max(points.length * 10, 24),
+      options.radius ?? 0.026,
+      8,
+      options.closed,
+    );
+    const line = new THREE.Mesh(geometry, material);
+    line.renderOrder = 24;
+    line.userData.selectable = false;
+    return line;
+  }
+
+  private getRegionVerticalSpan() {
+    if (!this.modelRoot) {
+      return { bottom: 0, top: 1 };
+    }
+    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    if (box.isEmpty()) {
+      return { bottom: 0, top: 1 };
+    }
+    return { bottom: box.min.y, top: box.max.y + 0.035 };
+  }
+
+  private createSelectedRegionVolume(region: EditorRegion) {
+    const { bottom, top } = this.getRegionVerticalSpan();
+    const vertices: number[] = [];
+    const indices: number[] = [];
+    for (const point of region.points) {
+      vertices.push(point.x, bottom, point.z, point.x, top, point.z);
+    }
+    for (let index = 0; index < region.points.length; index += 1) {
+      const nextIndex = (index + 1) % region.points.length;
+      const bottomA = index * 2;
+      const topA = bottomA + 1;
+      const bottomB = nextIndex * 2;
+      const topB = bottomB + 1;
+      indices.push(bottomA, bottomB, topB, bottomA, topB, topA);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x29d3c4,
+      transparent: true,
+      opacity: 0.1,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    });
+    const volume = new THREE.Mesh(geometry, material);
+    volume.renderOrder = 23;
+    volume.userData.selectable = false;
+    volume.userData.regionVolume = true;
+    return volume;
+  }
+
+  private createRegionVerticalEdges(region: EditorRegion, bottom: number, top: number) {
+    const curve = new THREE.CurvePath<THREE.Vector3>();
+    for (const point of region.points) {
+      curve.add(
+        new THREE.LineCurve3(
+          new THREE.Vector3(point.x, bottom, point.z),
+          new THREE.Vector3(point.x, top, point.z),
+        ),
+      );
+    }
+    const geometry = new THREE.TubeGeometry(
+      curve,
+      Math.max(region.points.length * 6, 24),
+      0.009,
+      6,
+      false,
+    );
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x29d3c4,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const edges = new THREE.Mesh(geometry, material);
+    edges.renderOrder = 25;
+    edges.userData.selectable = false;
+    edges.userData.regionEdgeLayer = "vertical";
+    return edges;
+  }
+
+  private createRegionGlow(region: EditorRegion, y: number) {
+    const bounds = getEditorRegionBounds(region);
+    const curve = new THREE.CurvePath<THREE.Vector3>();
+    for (let index = 0; index < region.points.length; index += 1) {
+      const current = region.points[index];
+      const next = region.points[(index + 1) % region.points.length];
+      curve.add(
+        new THREE.LineCurve3(
+          new THREE.Vector3(current.x, y, current.z),
+          new THREE.Vector3(next.x, y, next.z),
+        ),
+      );
+    }
+    const maxSize = bounds ? Math.max(bounds.size.x, bounds.size.z) : 1;
+    const radius = THREE.MathUtils.clamp(maxSize * 0.0025, 0.008, 0.018);
+    const geometry = new THREE.TubeGeometry(
+      curve,
+      Math.max(region.points.length * 8, 32),
+      radius,
+      8,
+      true,
+    );
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x29d3c4,
+      transparent: true,
+      opacity: 0.16,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const glow = new THREE.Mesh(geometry, material);
+    glow.renderOrder = 26;
+    glow.userData.selectable = false;
+    return glow;
+  }
+
+  private rebuildRegionObjects() {
+    this.clearRegionObjects();
+    if (!this.selectedRegionId) {
+      return;
+    }
+    const y = this.getRegionVisualY();
+    for (const region of this.regions) {
+      const selected = region.id === this.selectedRegionId;
+      if (!selected) {
+        continue;
+      }
+      const group = new THREE.Group();
+      group.name = `region:${region.name}`;
+      group.userData.regionId = region.id;
+      group.userData.selectable = false;
+      const { bottom, top } = this.getRegionVerticalSpan();
+      const highlightMode = region.highlightMode ?? "edges";
+      if (highlightMode === "none") {
+        continue;
+      }
+      if (highlightMode === "bottom") {
+        group.add(this.createRegionFill(region, bottom + 0.006, selected, "bottom"));
+        this.regionGroup.add(group);
+        continue;
+      }
+      if (highlightMode === "top") {
+        group.add(this.createRegionFill(region, top + 0.006, selected, "top"));
+        this.regionGroup.add(group);
+        continue;
+      }
+
+      group.add(this.createSelectedRegionVolume(region));
+      group.add(this.createRegionFill(region, bottom + 0.006, selected, "bottom"));
+      group.add(this.createRegionFill(region, top + 0.006, selected, "top"));
+
+      if (highlightMode === "edges") {
+        const topEdges = this.createRegionLine(region.points, top + 0.006, {
+          closed: true,
+          opacity: 0.74,
+          radius: 0.012,
+        });
+        topEdges.userData.regionEdgeLayer = "top";
+        group.add(topEdges);
+        const bottomEdges = this.createRegionLine(region.points, bottom + 0.006, {
+          closed: true,
+          opacity: 0.46,
+          radius: 0.01,
+        });
+        bottomEdges.userData.regionEdgeLayer = "bottom";
+        group.add(bottomEdges);
+        group.add(this.createRegionVerticalEdges(region, bottom + 0.006, top + 0.006));
+        group.add(this.createRegionGlow(region, y + 0.012));
+      }
+      this.regionGroup.add(group);
+    }
+  }
+
+  private updateRegionDraftObjects() {
+    this.clearRegionDraftObjects();
+    const y = this.getRegionVisualY() + 0.025;
+    if (this.regionDraftPoints.length === 0) {
+      return;
+    }
+    this.regionDraftGroup.add(
+      this.createRegionLine(
+        this.regionDraftHoverPoint
+          ? [...this.regionDraftPoints, this.regionDraftHoverPoint]
+          : this.regionDraftPoints,
+        y,
+        {
+          closed: !this.regionDraftHoverPoint && this.regionDraftPoints.length >= 3,
+          opacity: 0.86,
+          radius: 0.038,
+        },
+      ),
+    );
+    for (const point of this.regionDraftPoints) {
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.055, 12, 8),
+        new THREE.MeshBasicMaterial({
+          color: 0x29d3c4,
+          transparent: true,
+          opacity: 0.92,
+          depthWrite: false,
+        }),
+      );
+      marker.position.set(point.x, y + 0.015, point.z);
+      marker.renderOrder = 28;
+      marker.userData.selectable = false;
+      this.regionDraftGroup.add(marker);
+    }
+  }
+
+  private resolveRegionPointAt(clientX: number, clientY: number) {
+    const activeCamera =
+      this.viewMode === "perspective" ? this.camera : this.orthoCamera;
+    if (!this.renderer || !activeCamera) {
+      return null;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, activeCamera);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -this.getRegionVisualY());
+    const point = new THREE.Vector3();
+    if (!this.raycaster.ray.intersectPlane(plane, point)) {
+      return null;
+    }
+    return { x: point.x, z: point.z };
+  }
+
+  private focusCameraOnRegion(region: EditorRegion) {
+    if (!this.controls) {
+      return;
+    }
+    const bounds = getEditorRegionBounds(region);
+    if (!bounds) {
+      return;
+    }
+    const visualY = this.getRegionVisualY();
+    const center = new THREE.Vector3(bounds.center.x, visualY, bounds.center.z);
+    if (this.viewMode !== "perspective") {
+      if (!this.orthoCamera) {
+        return;
+      }
+      const delta = center.clone().sub(this.controls.target);
+      this.previewCameraTransition = {
+        camera: this.orthoCamera,
+        startTime: performance.now(),
+        duration: 520,
+        fromPosition: this.orthoCamera.position.clone(),
+        toPosition: this.orthoCamera.position.clone().add(delta),
+        fromTarget: this.controls.target.clone(),
+        toTarget: center,
+      };
+      return;
+    }
+    if (!this.camera) {
+      return;
+    }
+    const maxSize = Math.max(bounds.size.x, bounds.size.z, 0.8);
+    let direction = this.camera.position.clone().sub(this.controls.target);
+    if (direction.lengthSq() === 0) {
+      direction = new THREE.Vector3(0.9, 0.65, 1);
+    }
+    direction.normalize();
+    const distance = Math.max(
+      (maxSize / (2 * Math.tan((this.camera.fov * Math.PI) / 360))) * 1.85,
+      2.6,
+    );
+    const nextPosition = center.clone().add(direction.multiplyScalar(distance));
+    nextPosition.y = Math.max(nextPosition.y, visualY + maxSize * 0.45, visualY + 0.8);
+    this.camera.near = Math.max(distance / 100, 0.01);
+    this.camera.far = Math.max(distance * 100, 1000);
+    this.camera.updateProjectionMatrix();
+    this.previewCameraTransition = {
+      camera: this.camera,
+      startTime: performance.now(),
+      duration: 650,
+      fromPosition: this.camera.position.clone(),
+      toPosition: nextPosition,
+      fromTarget: this.controls.target.clone(),
+      toTarget: center,
+    };
+  }
+
+  private restoreOrbitTargetToGridCenter() {
+    if (!this.controls) {
+      return;
+    }
+    const target = new THREE.Vector3(0, 0, 0);
+    if (this.controls.target.distanceToSquared(target) < 0.000001) {
+      return;
+    }
+    const activeCamera = this.viewMode === "perspective" ? this.camera : this.orthoCamera;
+    if (!activeCamera) {
+      this.controls.target.copy(target);
+      this.controls.update();
+      return;
+    }
+    const delta = target.clone().sub(this.controls.target);
+    this.previewCameraTransition = {
+      camera: activeCamera,
+      startTime: performance.now(),
+      duration: 480,
+      fromPosition: activeCamera.position.clone(),
+      toPosition: activeCamera.position.clone().add(delta),
+      fromTarget: this.controls.target.clone(),
+      toTarget: target,
     };
   }
 
@@ -1929,6 +2733,15 @@ export class ThreeEditor {
     if (this.previewMode && event.button !== 0) {
       return;
     }
+    if (this.regionDrawingEnabled && !this.previewMode && event.button === 0) {
+      this.pointerDownState = {
+        x: event.clientX,
+        y: event.clientY,
+        button: event.button,
+        shiftKey: event.shiftKey,
+      };
+      return;
+    }
     if (this.viewMode !== "perspective" && event.button === 0) {
       const rect = this.renderer.domElement.getBoundingClientRect();
       this.dragStart = {
@@ -1967,8 +2780,12 @@ export class ThreeEditor {
     return hit ? this.resolveSelectable(hit.object) : null;
   }
 
-  private handleContextMenu = (event: MouseEvent) => {
+  private handleContextMenu(event: MouseEvent) {
     event.preventDefault();
+    if (this.regionDrawingEnabled && !this.previewMode) {
+      this.cancelRegionDrawing();
+      return;
+    }
     if (this.viewMode === "perspective") {
       const target = this.pickSelectableAt(event.clientX, event.clientY);
       if (!target || target === this.modelRoot) {
@@ -1982,9 +2799,14 @@ export class ThreeEditor {
       });
       return;
     }
-  };
+  }
 
   private handlePointerMove = (event: PointerEvent) => {
+    if (this.regionDrawingEnabled && !this.previewMode) {
+      this.regionDraftHoverPoint = this.resolveRegionPointAt(event.clientX, event.clientY);
+      this.updateRegionDraftObjects();
+      return;
+    }
     if (!this.renderer || !this.dragStart || this.viewMode === "perspective") {
       return;
     }
@@ -1996,6 +2818,29 @@ export class ThreeEditor {
   };
 
   private handlePointerUp = (event: PointerEvent) => {
+    if (this.regionDrawingEnabled && !this.previewMode) {
+      const pointerDownState = this.pointerDownState;
+      this.pointerDownState = null;
+      if (!pointerDownState || pointerDownState.button !== 0) {
+        return;
+      }
+      const moved = Math.hypot(
+        event.clientX - pointerDownState.x,
+        event.clientY - pointerDownState.y,
+      );
+      if (moved > 4) {
+        return;
+      }
+      const point = this.resolveRegionPointAt(event.clientX, event.clientY);
+      if (!point) {
+        return;
+      }
+      this.regionDraftPoints = [...this.regionDraftPoints, point];
+      this.regionDraftHoverPoint = null;
+      this.updateRegionDraftObjects();
+      this.options.onRegionDraftChange?.(this.regionDraftPoints.length);
+      return;
+    }
     if (this.viewMode === "perspective") {
       const pointerDownState = this.pointerDownState;
       this.pointerDownState = null;
@@ -2010,14 +2855,24 @@ export class ThreeEditor {
         return;
       }
       const target = this.pickSelectableAt(event.clientX, event.clientY);
+      const targetBindings =
+        target && target !== this.modelRoot ? getObjectBindings(target) : [];
+      const directObjectHasBindings = getBoundEntityIds(targetBindings).length > 0;
+      if (target && directObjectHasBindings) {
+        if (pointerDownState.shiftKey && !this.previewMode) {
+          this.toggleObjectSelection(target.uuid);
+          return;
+        }
+        this.selectObject(target.uuid);
+        if (this.previewMode && this.previewCameraMode === "auto") {
+          this.focusPreviewCameraOnObject(target);
+        }
+        return;
+      }
       if (!target) {
         if (!pointerDownState.shiftKey) {
           this.selectObject(null);
         }
-        return;
-      }
-      if (pointerDownState.shiftKey && !this.previewMode) {
-        this.toggleObjectSelection(target.uuid);
         return;
       }
       this.selectObject(target.uuid);
@@ -2038,6 +2893,9 @@ export class ThreeEditor {
     this.dragStart = null;
     this.removeDragBox();
     if (box.width < 4 || box.height < 4) {
+      if (!event.shiftKey) {
+        this.selectObject(null);
+      }
       return;
     }
     this.selectObjects(this.findObjectsFullyInsideRect(box));
@@ -2396,11 +3254,11 @@ export class ThreeEditor {
         ? new THREE.FogExp2(preset.lighting.background, fogDensity)
         : null;
     if (this.renderer) {
-      this.renderer.toneMappingExposure = THREE.MathUtils.clamp(
-        this.environmentConfig.exposure + preset.lighting.exposureOffset,
-        0.25,
-        2.6,
-      );
+      this.renderer.toneMappingExposure = resolveToneMappingExposure({
+        exposure: this.environmentConfig.exposure,
+        weatherExposureOffset: preset.lighting.exposureOffset,
+        realisticRenderingEnabled: this.performanceConfig.realisticRenderingEnabled,
+      });
     }
   }
 
@@ -2531,7 +3389,7 @@ export class ThreeEditor {
 
   private updatePreviewCameraTransition(now: number) {
     const transition = this.previewCameraTransition;
-    if (!transition || !this.camera || !this.controls) {
+    if (!transition || !this.controls) {
       return;
     }
     const ratio = THREE.MathUtils.clamp(
@@ -2542,7 +3400,7 @@ export class ThreeEditor {
     const eased = ratio < 0.5
       ? 4 * ratio * ratio * ratio
       : 1 - Math.pow(-2 * ratio + 2, 3) / 2;
-    this.camera.position.lerpVectors(
+    transition.camera.position.lerpVectors(
       transition.fromPosition,
       transition.toPosition,
       eased,
@@ -2553,8 +3411,12 @@ export class ThreeEditor {
       eased,
     );
     if (ratio >= 1) {
+      if ((transition.camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+        (transition.camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+      }
       this.previewCameraTransition = null;
     }
+    this.controls.update();
   }
 
   private addWeatherClouds(
@@ -2897,13 +3759,12 @@ export class ThreeEditor {
         preset.lighting.directionalMultiplier +
       flashRatio * 1.35;
     if (this.renderer) {
-      this.renderer.toneMappingExposure = THREE.MathUtils.clamp(
-        this.environmentConfig.exposure +
-          preset.lighting.exposureOffset +
-          flashRatio * 0.26,
-        0.25,
-        2.8,
-      );
+      this.renderer.toneMappingExposure = resolveToneMappingExposure({
+        exposure: this.environmentConfig.exposure,
+        weatherExposureOffset: preset.lighting.exposureOffset,
+        lightningExposureBoost: flashRatio * 0.26,
+        realisticRenderingEnabled: this.performanceConfig.realisticRenderingEnabled,
+      });
     }
   }
 

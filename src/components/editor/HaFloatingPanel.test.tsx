@@ -23,6 +23,7 @@ describe("HaFloatingPanel", () => {
           { type: "entity", entityId: "light.lamp" },
           { type: "entity", entityId: "switch.socket" },
         ]}
+        coverCapability={null}
         lightCapability={null}
         states={{
           "light.lamp": {

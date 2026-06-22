@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { EditorHistoryState } from "../../lib/editor-history";
 import { ThreeEditor } from "../../lib/three-editor";
 import type { PerformanceConfig, ViewMode } from "../../types/editor";
@@ -11,6 +12,7 @@ type ViewportProps = {
   onHistoryChange: (state: EditorHistoryState) => void;
   onLoadProgress: (progress: number) => void;
   onObjectContextMenu: (event: { clientX: number; clientY: number; uuid: string }) => void;
+  onRegionDraftChange: (pointCount: number) => void;
   canDropModel: (dataTransfer: DataTransfer) => boolean;
   onModelDrop: (
     dataTransfer: DataTransfer,
@@ -20,6 +22,7 @@ type ViewportProps = {
   error: string | null;
   viewMode: ViewMode;
   previewMode: boolean;
+  children?: ReactNode;
 };
 
 export function Viewport({
@@ -30,12 +33,14 @@ export function Viewport({
   onHistoryChange,
   onLoadProgress,
   onObjectContextMenu,
+  onRegionDraftChange,
   canDropModel,
   onModelDrop,
   isLoading,
   error,
   viewMode,
   previewMode,
+  children,
 }: ViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const initialRenderBackendRef = useRef(performance.renderBackend);
@@ -45,6 +50,7 @@ export function Viewport({
     onHistoryChange,
     onLoadProgress,
     onObjectContextMenu,
+    onRegionDraftChange,
   });
   const editorRef = useRef<ThreeEditor | null>(null);
   const [fps, setFps] = useState<number | null>(null);
@@ -56,8 +62,16 @@ export function Viewport({
       onHistoryChange,
       onLoadProgress,
       onObjectContextMenu,
+      onRegionDraftChange,
     };
-  }, [onHistoryChange, onLoadProgress, onModelChange, onObjectContextMenu, onSelectionChange]);
+  }, [
+    onHistoryChange,
+    onLoadProgress,
+    onModelChange,
+    onObjectContextMenu,
+    onRegionDraftChange,
+    onSelectionChange,
+  ]);
 
   useEffect(() => {
     if (!hostRef.current) {
@@ -66,11 +80,14 @@ export function Viewport({
     const editor = new ThreeEditor(hostRef.current, {
       renderBackend: initialRenderBackendRef.current,
       quality: performance.quality,
+      realisticRenderingEnabled: performance.realisticRenderingEnabled,
       onSelectionChange: (uuid) => callbacksRef.current.onSelectionChange(uuid),
       onModelChange: () => callbacksRef.current.onModelChange(),
       onHistoryChange: (state) => callbacksRef.current.onHistoryChange(state),
       onLoadProgress: (progress) => callbacksRef.current.onLoadProgress(progress),
       onObjectContextMenu: (event) => callbacksRef.current.onObjectContextMenu(event),
+      onRegionDraftChange: (pointCount) =>
+        callbacksRef.current.onRegionDraftChange(pointCount),
       onFpsChange: setFps,
     });
     let disposed = false;
@@ -126,6 +143,7 @@ export function Viewport({
           }
         }}
       />
+      {children}
       {!previewMode ? (
         <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-border bg-panel/80 px-3 py-2 text-xs text-muted-foreground shadow-xl backdrop-blur">
           {viewMode === "perspective"

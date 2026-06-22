@@ -11,6 +11,32 @@ export type Vector3Values = {
   z: number;
 };
 
+export type RegionPoint = {
+  x: number;
+  z: number;
+};
+
+export type EditorRegion = {
+  id: string;
+  name: string;
+  hidden?: boolean;
+  highlightMode?: EditorRegionHighlightMode;
+  points: RegionPoint[];
+};
+
+export type EditorRegionHighlightMode =
+  | "none"
+  | "faces"
+  | "edges"
+  | "bottom"
+  | "top";
+
+export type ObjectRegionAssignment = {
+  mode: "auto" | "manual";
+  regionId: string | null;
+  initialized?: boolean;
+};
+
 export type ModelTreeNode = {
   id: string;
   objectId: string | null;
@@ -30,6 +56,8 @@ export type ObjectMetadata = {
   bindings: HaBinding[];
   coverCapability: HaCoverCapabilityConfig | null;
   lightCapability: HaLightCapabilityConfig | null;
+  regionAssignment: ObjectRegionAssignment;
+  resolvedRegionId: string | null;
   name: string;
   type: string;
   parentName: string | null;
@@ -64,11 +92,13 @@ export type RenderQuality = "low" | "medium" | "high" | "ultra";
 export type PerformanceConfig = {
   renderBackend: RenderBackend;
   quality: RenderQuality;
+  realisticRenderingEnabled: boolean;
 };
 
 export const defaultPerformance: PerformanceConfig = {
   renderBackend: "webgl",
   quality: "high",
+  realisticRenderingEnabled: false,
 };
 
 export type ViewMode = "perspective" | "top" | "front" | "side";
