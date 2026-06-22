@@ -4,3 +4,7 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+*.test.*
+*.spec.*
+__tests__/
+coverage/
