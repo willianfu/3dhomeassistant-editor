@@ -9,6 +9,9 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import type {
+  AppearanceTheme,
+} from "../types/appearance";
+import type {
   EnvironmentConfig,
   EditorRegion,
   PerformanceConfig,
@@ -16,6 +19,7 @@ import type {
   RegionPoint,
   RenderBackend,
   RenderQuality,
+  TransformMode,
   Vector3Values,
   ViewMode,
 } from "../types/editor";
@@ -26,6 +30,7 @@ import {
   resolveWeatherCloudParticleCount,
   resolveWeatherCloudScale,
   resolveWeatherCloudWrapPadding,
+  resolveWeatherBackground,
   resolveWeatherEffectSpan,
   resolveWeatherFogDensity,
   resolveWeatherLightningRadius,
@@ -52,6 +57,13 @@ import type {
 } from "../types/ha";
 import { defaultEnvironment, defaultPerformance } from "../types/editor";
 import { EditorHistory, type EditorHistoryState } from "./editor-history";
+import {
+  clampToFirstPersonBounds,
+  getFirstPersonSpawnPosition,
+  getFirstPersonVelocity,
+  type FirstPersonDirection,
+  type FirstPersonMoveState,
+} from "./first-person-controls";
 import {
   applyEditorLocalConfig,
   createEditorLocalConfig,
@@ -99,10 +111,16 @@ import {
   enhanceMaterialForRole,
   resolveRealisticMaterialRole,
 } from "./realistic-materials";
+import {
+  makeMaterialDoubleSided,
+  makeMaterialOpaque,
+  shouldUseDoubleSidedMaterial,
+} from "./material-visibility";
 import { getResizeRatios, scalePointAroundCenter } from "./selection-transform";
 import { computeDirectionalShadowBounds } from "./shadow-bounds";
 import { resolveSelectableObject } from "./selectable-object";
 import { disposeObjectTree } from "./three-dispose";
+import { getIncrementalTransformDelta } from "./transform-delta";
 import { getViewControlMode } from "./view-controls";
 import { isVerticalWallLikeBox } from "./wall-visibility";
 import {
@@ -129,7 +147,10 @@ export type ThreeEditorOptions = {
   onModelChange?: () => void;
   onHistoryChange?: (state: EditorHistoryState) => void;
   onLoadProgress?: (progress: number) => void;
-  onFpsChange?: (fps: number) => void;
+  onFpsChange?: (
+    fps: number,
+    stats?: { calls: number; triangles: number; points: number; lines: number },
+  ) => void;
 };
 
 type ObjectSnapshot = {
@@ -201,6 +222,12 @@ type PreviewCameraTransition = {
   toTarget: THREE.Vector3;
 };
 
+type FirstPersonPointerState = {
+  pointerId: number;
+  x: number;
+  y: number;
+};
+
 const REGION_CLOSE_THRESHOLD = 0.35;
 
 function colorTemperatureToColor(kelvin: number) {
@@ -240,7 +267,10 @@ export class ThreeEditor {
   private transformHelper: THREE.Object3D | null = null;
   private transformPivot = new THREE.Object3D();
   private transformStartPivot = new THREE.Vector3();
+  private transformPreviousPivot = new THREE.Vector3();
+  private transformStartQuaternion = new THREE.Quaternion();
   private transformStartPositions = new Map<string, THREE.Vector3>();
+  private transformStartWorldQuaternions = new Map<string, THREE.Quaternion>();
   private transformStartSnapshots: ObjectSnapshot[] = [];
   private grid = new THREE.GridHelper(24, 24, 0x47606c, 0x27333b);
   private ambient = new THREE.AmbientLight(0xffffff, defaultEnvironment.ambientIntensity);
@@ -258,6 +288,7 @@ export class ThreeEditor {
   private animationFrame = 0;
   private modelRoot: THREE.Object3D | null = null;
   private objectMap = new Map<string, THREE.Object3D>();
+  private selectableMeshes: THREE.Mesh[] = [];
   private originalMaterials = new Map<string, THREE.Material | THREE.Material[]>();
   private realisticOriginalMaterials = new Map<
     string,
@@ -293,10 +324,26 @@ export class ThreeEditor {
   private selectedIds = new Set<string>();
   private selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x29d3c4);
   private multiSelectionGroup = new THREE.Group();
+  private transformMode: TransformMode = "translate";
   private viewMode: ViewMode = "perspective";
+  private appearanceTheme: AppearanceTheme = "dark";
   private previewMode = false;
   private previewCameraMode: PreviewCameraMode = "manual";
   private previewCameraTransition: PreviewCameraTransition | null = null;
+  private firstPersonMoveState: FirstPersonMoveState = {
+    forward: false,
+    backward: false,
+    left: false,
+    right: false,
+    fast: false,
+  };
+  private firstPersonPointerState: FirstPersonPointerState | null = null;
+  private firstPersonYaw = 0;
+  private firstPersonPitch = 0;
+  private firstPersonLastFrame = 0;
+  private readonly firstPersonMoveSpeed = 1.65;
+  private readonly firstPersonFastMultiplier = 2.4;
+  private readonly firstPersonLookSensitivity = 0.0032;
   private environmentConfig: EnvironmentConfig = defaultEnvironment;
   private performanceConfig: PerformanceConfig = defaultPerformance;
   private dragStart: { x: number; y: number } | null = null;
@@ -305,6 +352,11 @@ export class ThreeEditor {
     y: number;
     button: number;
     shiftKey: boolean;
+  } | null = null;
+  private contextMenuPointerDownState: {
+    x: number;
+    y: number;
+    button: number;
   } | null = null;
   private dragBoxElement: HTMLDivElement | null = null;
   private destroyed = false;
@@ -321,6 +373,7 @@ export class ThreeEditor {
       quality: options.quality ?? defaultPerformance.quality,
       realisticRenderingEnabled:
         options.realisticRenderingEnabled ?? defaultPerformance.realisticRenderingEnabled,
+      modelShadowsEnabled: defaultPerformance.modelShadowsEnabled,
     };
     this.dracoLoader = new DRACOLoader();
     this.dracoLoader.setDecoderPath("/draco/");
@@ -335,7 +388,7 @@ export class ThreeEditor {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = defaultEnvironment.exposure;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.setClearColor(0x0b1017, 1);
+    this.renderer.setClearColor(resolveWeatherBackground("none", this.appearanceTheme), 1);
     this.renderer.domElement.className = "h-full w-full outline-none";
     this.container.appendChild(this.renderer.domElement);
     this.updateRealisticRendering();
@@ -355,7 +408,7 @@ export class ThreeEditor {
     this.controls.update();
 
     this.transformControls = new TransformControls(this.camera, this.renderer.domElement);
-    this.transformControls.setMode("translate");
+    this.transformControls.setMode(this.transformMode);
     this.transformControls.setSpace("world");
     this.transformControls.setSize(0.95);
     this.transformControls.enabled = false;
@@ -369,7 +422,9 @@ export class ThreeEditor {
       this.handleTransformDraggingChange,
     );
 
-    this.scene.background = new THREE.Color(0x0b1017);
+    this.scene.background = new THREE.Color(
+      resolveWeatherBackground("none", this.appearanceTheme),
+    );
     this.grid.position.y = 0;
     this.scene.add(this.grid);
     this.directional.position.set(
@@ -405,6 +460,8 @@ export class ThreeEditor {
       this.handleContextMenuListener,
     );
     window.addEventListener("pointerup", this.handlePointerUp);
+    window.addEventListener("keydown", this.handleFirstPersonKeyDown);
+    window.addEventListener("keyup", this.handleFirstPersonKeyUp);
     this.animate();
   }
 
@@ -430,6 +487,9 @@ export class ThreeEditor {
     const realisticRenderingChanged =
       this.performanceConfig.realisticRenderingEnabled !==
       (config.realisticRenderingEnabled === true);
+    const modelShadowsChanged =
+      this.performanceConfig.modelShadowsEnabled !==
+      (config.modelShadowsEnabled === true);
     this.performanceConfig = {
       renderBackend:
         config.renderBackend === "webgpu" || config.renderBackend === "webgl"
@@ -437,10 +497,14 @@ export class ThreeEditor {
           : defaultPerformance.renderBackend,
       quality: config.quality ?? defaultPerformance.quality,
       realisticRenderingEnabled: config.realisticRenderingEnabled === true,
+      modelShadowsEnabled: config.modelShadowsEnabled === true,
     };
     this.applyRenderQuality();
     if (realisticRenderingChanged) {
       this.updateRealisticRendering();
+    }
+    if (modelShadowsChanged && this.modelRoot) {
+      this.applyModelShadowFlags(this.modelRoot);
     }
   }
 
@@ -449,20 +513,22 @@ export class ThreeEditor {
       return;
     }
     const profile = getRenderQualityProfile(this.performanceConfig.quality);
+    const shadowsEnabled =
+      profile.shadowEnabled && this.performanceConfig.modelShadowsEnabled;
     this.renderer.setPixelRatio(
       Math.min(window.devicePixelRatio || 1, profile.pixelRatioCap),
     );
-    this.renderer.shadowMap.enabled = profile.shadowEnabled;
+    this.renderer.shadowMap.enabled = shadowsEnabled;
     this.renderer.shadowMap.type =
       profile.shadowType === "soft" ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
-    this.directional.castShadow = profile.shadowEnabled;
+    this.directional.castShadow = shadowsEnabled;
     this.directional.shadow.radius = profile.shadowRadius;
     const mapSizeChanged =
       this.directional.shadow.mapSize.x !== profile.shadowMapSize ||
       this.directional.shadow.mapSize.y !== profile.shadowMapSize;
     this.directional.shadow.mapSize.set(profile.shadowMapSize, profile.shadowMapSize);
     if (this.directional.shadow.map) {
-      if (mapSizeChanged || !profile.shadowEnabled) {
+      if (mapSizeChanged || !shadowsEnabled) {
         this.directional.shadow.map.dispose();
         this.directional.shadow.map = null;
       }
@@ -507,6 +573,9 @@ export class ThreeEditor {
     }
     this.clearStudioEnvironment();
     this.restoreRealisticMaterials();
+    if (this.modelRoot) {
+      this.ensureModelMaterialVisibility(this.modelRoot);
+    }
   }
 
   private createEnvironmentFace(topColor: string, bottomColor: string) {
@@ -541,6 +610,8 @@ export class ThreeEditor {
       this.handleContextMenuListener,
     );
     window.removeEventListener("pointerup", this.handlePointerUp);
+    window.removeEventListener("keydown", this.handleFirstPersonKeyDown);
+    window.removeEventListener("keyup", this.handleFirstPersonKeyUp);
     this.restoreWallTransparency();
     this.clearWeatherEffects();
     this.clearRegionObjects();
@@ -958,13 +1029,7 @@ export class ThreeEditor {
       return;
     }
     const before = this.captureSnapshots(objects);
-    for (const object of objects) {
-      if (!object.parent) {
-        continue;
-      }
-      const worldPosition = object.getWorldPosition(new THREE.Vector3()).add(delta);
-      object.position.copy(object.parent.worldToLocal(worldPosition));
-    }
+    this.translateObjectsByWorldDelta(objects, delta);
     this.updateSelectionBox();
     this.updateTransformControls();
     if (this.modelRoot) {
@@ -972,6 +1037,77 @@ export class ThreeEditor {
     }
     this.options.onModelChange?.();
     this.pushTransformHistory("移动中心点", before, this.captureSnapshots(objects));
+  }
+
+  nudgeSelection(delta: Vector3Values) {
+    const objects = this.getSelectedObjects();
+    if (objects.length === 0) {
+      return false;
+    }
+    this.clearHaCoverAnimationsForObjects(objects);
+    const before = this.captureSnapshots(objects);
+    this.translateObjectsByWorldDelta(
+      objects,
+      new THREE.Vector3(delta.x, delta.y, delta.z),
+    );
+    this.updateSelectionBox();
+    this.updateTransformControls();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
+    this.options.onModelChange?.();
+    this.pushTransformHistory("微调移动", before, this.captureSnapshots(objects));
+    return true;
+  }
+
+  rotateSelection(rotation: Vector3Values) {
+    const objects = this.getSelectedObjects();
+    const box = this.getSelectionBox(objects);
+    if (!box) {
+      return false;
+    }
+    this.clearHaCoverAnimationsForObjects(objects);
+    const before = this.captureSnapshots(objects);
+    const rotationDelta = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(rotation.x, rotation.y, rotation.z, "XYZ"),
+    );
+    this.rotateObjectsAroundWorldCenter(
+      objects,
+      box.getCenter(new THREE.Vector3()),
+      rotationDelta,
+    );
+    this.updateSelectionBox();
+    this.updateTransformControls();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
+    this.options.onModelChange?.();
+    this.pushTransformHistory("旋转零件", before, this.captureSnapshots(objects));
+    return true;
+  }
+
+  updateSelectionRotation(rotation: Vector3Values) {
+    const objects = this.getSelectedObjects();
+    if (objects.length !== 1) {
+      return false;
+    }
+    this.clearHaCoverAnimationsForObjects(objects);
+    const before = this.captureSnapshots(objects);
+    objects[0].rotation.set(rotation.x, rotation.y, rotation.z);
+    this.updateSelectionBox();
+    this.updateTransformControls();
+    if (this.modelRoot) {
+      this.updateDirectionalShadowBounds(this.modelRoot);
+    }
+    this.options.onModelChange?.();
+    this.pushTransformHistory("旋转零件", before, this.captureSnapshots(objects));
+    return true;
+  }
+
+  setTransformMode(mode: TransformMode) {
+    this.transformMode = mode;
+    this.transformControls?.setMode(mode);
+    this.updateTransformControls();
   }
 
   scaleSelectionUniform(multiplier: number) {
@@ -1090,6 +1226,7 @@ export class ThreeEditor {
     ha: HaRuntimeConfig,
     performance: PerformanceConfig,
     regions: EditorRegion[] = this.regions,
+    appearance = { theme: this.appearanceTheme },
   ) {
     if (!this.modelRoot) {
       return null;
@@ -1101,6 +1238,7 @@ export class ThreeEditor {
       ha,
       performance,
       regions,
+      appearance,
     );
   }
 
@@ -1469,6 +1607,11 @@ export class ThreeEditor {
     this.applyWeatherAtmosphere();
   }
 
+  setAppearanceTheme(theme: AppearanceTheme) {
+    this.appearanceTheme = theme;
+    this.applyWeatherAtmosphere();
+  }
+
   setPreviewMode(enabled: boolean) {
     this.previewMode = enabled;
     if (enabled) {
@@ -1481,8 +1624,12 @@ export class ThreeEditor {
       }
       this.setTransformHelperVisible(false);
       this.updateWallTransparency();
+      if (this.previewCameraMode === "firstPerson") {
+        this.enterFirstPersonMode();
+      }
       return;
     }
+    this.exitFirstPersonMode();
     this.previewCameraTransition = null;
     this.updateSelectionBox();
     this.updateTransformControls();
@@ -1490,13 +1637,30 @@ export class ThreeEditor {
   }
 
   setPreviewCameraMode(mode: PreviewCameraMode) {
+    const wasFirstPerson = this.previewCameraMode === "firstPerson";
     this.previewCameraMode = mode;
+    if (mode === "firstPerson") {
+      if (this.previewMode) {
+        this.enterFirstPersonMode();
+      }
+      return;
+    }
+    if (wasFirstPerson) {
+      this.exitFirstPersonMode();
+    }
     if (mode === "manual") {
       this.previewCameraTransition = null;
     }
   }
 
+  setFirstPersonMoveDirection(direction: FirstPersonDirection, active: boolean) {
+    this.firstPersonMoveState[direction] = active;
+  }
+
   setViewMode(mode: ViewMode) {
+    if (mode !== "perspective" && this.previewCameraMode === "firstPerson") {
+      this.exitFirstPersonMode();
+    }
     this.viewMode = mode;
     this.previewCameraTransition = null;
     if (!this.controls || !this.modelRoot || !this.camera || !this.orthoCamera) {
@@ -1569,6 +1733,7 @@ export class ThreeEditor {
     }
     this.modelRoot = null;
     this.objectMap.clear();
+    this.selectableMeshes = [];
     this.rebuildWeatherEffects();
     this.options.onModelChange?.();
   }
@@ -1730,16 +1895,64 @@ export class ThreeEditor {
     root.traverse((node) => {
       if ((node as THREE.Mesh).isMesh) {
         const mesh = node as THREE.Mesh;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
         const lightReactiveMaterial = this.ensureLightReactiveMaterial(mesh.material);
         mesh.material = this.performanceConfig.realisticRenderingEnabled
           ? this.enhanceRealisticMaterialSet(mesh, lightReactiveMaterial)
           : lightReactiveMaterial;
+        this.ensureMeshMaterialVisibility(mesh);
         mesh.userData.selectable = true;
       }
     });
+    this.applyModelShadowFlags(root);
     this.updateDirectionalShadowBounds(root);
+  }
+
+  private ensureModelMaterialVisibility(root: THREE.Object3D) {
+    root.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!mesh.isMesh) {
+        return;
+      }
+      this.ensureMeshMaterialVisibility(mesh);
+    });
+  }
+
+  private ensureMeshMaterialVisibility(mesh: THREE.Mesh) {
+    makeMaterialOpaque(mesh.material);
+    const geometry = mesh.geometry;
+    if (!geometry) {
+      return;
+    }
+    if (!geometry.boundingBox) {
+      geometry.computeBoundingBox();
+    }
+    const box = geometry.boundingBox;
+    if (!box || box.isEmpty()) {
+      return;
+    }
+    const size = box.getSize(new THREE.Vector3());
+    const scale = mesh.getWorldScale(new THREE.Vector3());
+    size.set(
+      Math.abs(size.x * scale.x),
+      Math.abs(size.y * scale.y),
+      Math.abs(size.z * scale.z),
+    );
+    if (shouldUseDoubleSidedMaterial(size)) {
+      makeMaterialDoubleSided(mesh.material);
+    }
+  }
+
+  private applyModelShadowFlags(root: THREE.Object3D) {
+    const enabled = this.performanceConfig.modelShadowsEnabled;
+    root.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!mesh.isMesh) {
+        return;
+      }
+      mesh.castShadow = enabled;
+      mesh.receiveShadow = enabled;
+    });
+    this.directional.shadow.needsUpdate = true;
   }
 
   private ensureHaCoverAnimation(
@@ -2215,8 +2428,13 @@ export class ThreeEditor {
 
   private rebuildObjectMap() {
     this.objectMap.clear();
+    this.selectableMeshes = [];
     this.modelRoot?.traverse((node) => {
       this.objectMap.set(node.uuid, node);
+      const mesh = node as THREE.Mesh;
+      if (mesh.isMesh) {
+        this.selectableMeshes.push(mesh);
+      }
     });
   }
 
@@ -2727,6 +2945,19 @@ export class ThreeEditor {
     if (this.transformControls?.axis) {
       return;
     }
+    if (this.isFirstPersonActive()) {
+      if (event.button !== 0) {
+        return;
+      }
+      this.firstPersonPointerState = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+      };
+      this.renderer.domElement.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      return;
+    }
     if (this.previewMode && this.viewMode !== "perspective") {
       return;
     }
@@ -2760,6 +2991,11 @@ export class ThreeEditor {
       button: event.button,
       shiftKey: event.shiftKey,
     };
+    this.contextMenuPointerDownState = {
+      x: event.clientX,
+      y: event.clientY,
+      button: event.button,
+    };
   };
 
   private pickSelectableAt(clientX: number, clientY: number) {
@@ -2770,18 +3006,26 @@ export class ThreeEditor {
     this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const meshes: THREE.Object3D[] = [];
-    this.modelRoot.traverse((node) => {
-      if ((node as THREE.Mesh).isMesh) {
-        meshes.push(node);
-      }
-    });
-    const [hit] = this.raycaster.intersectObjects(meshes, true);
+    const meshes = this.selectableMeshes.filter(
+      (node) => node.visible,
+    );
+    const [hit] = this.raycaster.intersectObjects(meshes, false);
     return hit ? this.resolveSelectable(hit.object) : null;
   }
 
   private handleContextMenu(event: MouseEvent) {
     event.preventDefault();
+    const pointerDownState = this.contextMenuPointerDownState;
+    this.contextMenuPointerDownState = null;
+    if (pointerDownState?.button === 2) {
+      const moved = Math.hypot(
+        event.clientX - pointerDownState.x,
+        event.clientY - pointerDownState.y,
+      );
+      if (moved > 4) {
+        return;
+      }
+    }
     if (this.regionDrawingEnabled && !this.previewMode) {
       this.cancelRegionDrawing();
       return;
@@ -2802,6 +3046,26 @@ export class ThreeEditor {
   }
 
   private handlePointerMove = (event: PointerEvent) => {
+    if (this.isFirstPersonActive()) {
+      const pointerState = this.firstPersonPointerState;
+      if (!pointerState || pointerState.pointerId !== event.pointerId) {
+        return;
+      }
+      const deltaX = event.clientX - pointerState.x;
+      const deltaY = event.clientY - pointerState.y;
+      pointerState.x = event.clientX;
+      pointerState.y = event.clientY;
+      this.firstPersonYaw -= deltaX * this.firstPersonLookSensitivity;
+      this.firstPersonPitch = THREE.MathUtils.clamp(
+        this.firstPersonPitch - deltaY * this.firstPersonLookSensitivity,
+        -Math.PI / 2 + 0.08,
+        Math.PI / 2 - 0.08,
+      );
+      this.applyFirstPersonCameraRotation();
+      this.updateFirstPersonControlTarget();
+      event.preventDefault();
+      return;
+    }
     if (this.regionDrawingEnabled && !this.previewMode) {
       this.regionDraftHoverPoint = this.resolveRegionPointAt(event.clientX, event.clientY);
       this.updateRegionDraftObjects();
@@ -2818,6 +3082,15 @@ export class ThreeEditor {
   };
 
   private handlePointerUp = (event: PointerEvent) => {
+    if (this.isFirstPersonActive()) {
+      if (this.firstPersonPointerState?.pointerId === event.pointerId) {
+        this.firstPersonPointerState = null;
+        if (this.renderer?.domElement.hasPointerCapture(event.pointerId)) {
+          this.renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+      }
+      return;
+    }
     if (this.regionDrawingEnabled && !this.previewMode) {
       const pointerDownState = this.pointerDownState;
       this.pointerDownState = null;
@@ -2926,11 +3199,19 @@ export class ThreeEditor {
     const now = performance.now();
     const fps = this.fpsMeter.sample(now);
     if (fps !== null) {
-      this.options.onFpsChange?.(fps);
+      this.options.onFpsChange?.(fps, {
+        calls: this.renderer.info.render.calls,
+        triangles: this.renderer.info.render.triangles,
+        points: this.renderer.info.render.points,
+        lines: this.renderer.info.render.lines,
+      });
     }
     this.resizeIfNeeded();
     this.updatePreviewCameraTransition(now);
-    this.controls?.update();
+    this.updateFirstPersonControls(now);
+    if (!this.isFirstPersonActive()) {
+      this.controls?.update();
+    }
     this.updateHaCoverAnimations();
     this.updateWeatherEffects();
     this.updateHaPanelMarkers();
@@ -2982,6 +3263,136 @@ export class ThreeEditor {
       return new THREE.Vector3();
     }
     return new THREE.Box3().setFromObject(this.modelRoot).getCenter(new THREE.Vector3());
+  }
+
+  private isFirstPersonActive() {
+    return (
+      this.previewMode &&
+      this.previewCameraMode === "firstPerson" &&
+      this.viewMode === "perspective"
+    );
+  }
+
+  private enterFirstPersonMode() {
+    if (!this.camera || !this.controls || !this.modelRoot) {
+      return;
+    }
+    this.viewMode = "perspective";
+    this.previewCameraTransition = null;
+    this.controls.object = this.camera;
+    this.controls.enabled = false;
+    this.resetFirstPersonMovement();
+    const bounds = new THREE.Box3().setFromObject(this.modelRoot);
+    if (!bounds.isEmpty()) {
+      const spawn = getFirstPersonSpawnPosition({
+        min: bounds.min,
+        max: bounds.max,
+      });
+      this.camera.position.set(spawn.x, spawn.y, spawn.z);
+    }
+    this.firstPersonYaw = 0;
+    this.firstPersonPitch = 0;
+    this.firstPersonLastFrame = performance.now();
+    this.applyFirstPersonCameraRotation();
+    this.updateFirstPersonControlTarget();
+  }
+
+  private exitFirstPersonMode() {
+    if (
+      this.firstPersonPointerState &&
+      this.renderer?.domElement.hasPointerCapture(this.firstPersonPointerState.pointerId)
+    ) {
+      this.renderer.domElement.releasePointerCapture(
+        this.firstPersonPointerState.pointerId,
+      );
+    }
+    this.firstPersonPointerState = null;
+    this.resetFirstPersonMovement();
+    if (this.controls) {
+      this.applyControlMode(this.viewMode);
+      this.updateFirstPersonControlTarget();
+    }
+  }
+
+  private resetFirstPersonMovement() {
+    this.firstPersonMoveState = {
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      fast: false,
+    };
+  }
+
+  private applyFirstPersonCameraRotation() {
+    if (!this.camera) {
+      return;
+    }
+    this.camera.rotation.set(
+      this.firstPersonPitch,
+      this.firstPersonYaw,
+      0,
+      "YXZ",
+    );
+  }
+
+  private updateFirstPersonControlTarget() {
+    if (!this.camera || !this.controls) {
+      return;
+    }
+    const direction = this.camera.getWorldDirection(new THREE.Vector3());
+    this.controls.target.copy(this.camera.position).add(direction);
+  }
+
+  private getFirstPersonMovementBounds() {
+    if (!this.modelRoot) {
+      return null;
+    }
+    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    if (box.isEmpty()) {
+      return null;
+    }
+    const size = box.getSize(new THREE.Vector3());
+    const padding = Math.max(Math.max(size.x, size.z) * 0.08, 0.8);
+    box.expandByVector(new THREE.Vector3(padding, padding * 0.5, padding));
+    return box;
+  }
+
+  private updateFirstPersonControls(now: number) {
+    if (!this.isFirstPersonActive() || !this.camera) {
+      this.firstPersonLastFrame = now;
+      return;
+    }
+    const deltaSeconds = Math.min(
+      Math.max((now - this.firstPersonLastFrame) / 1000, 0),
+      0.05,
+    );
+    this.firstPersonLastFrame = now;
+    const speed =
+      this.firstPersonMoveSpeed *
+      (this.firstPersonMoveState.fast ? this.firstPersonFastMultiplier : 1);
+    const velocity = getFirstPersonVelocity(
+      this.firstPersonMoveState,
+      this.firstPersonYaw,
+      speed * deltaSeconds,
+    );
+    if (velocity.x === 0 && velocity.z === 0) {
+      return;
+    }
+    const nextPosition = this.camera.position.clone().add(
+      new THREE.Vector3(velocity.x, velocity.y, velocity.z),
+    );
+    const bounds = this.getFirstPersonMovementBounds();
+    if (bounds) {
+      const clamped = clampToFirstPersonBounds(nextPosition, {
+        min: bounds.min,
+        max: bounds.max,
+      });
+      this.camera.position.set(clamped.x, clamped.y, clamped.z);
+    } else {
+      this.camera.position.copy(nextPosition);
+    }
+    this.updateFirstPersonControlTarget();
   }
 
   private applyControlMode(mode: ViewMode) {
@@ -3104,6 +3515,55 @@ export class ThreeEditor {
       .filter((object): object is THREE.Object3D => Boolean(object));
   }
 
+  private translateObjectsByWorldDelta(
+    objects: THREE.Object3D[],
+    delta: THREE.Vector3,
+  ) {
+    for (const object of objects) {
+      if (!object.parent) {
+        continue;
+      }
+      const worldPosition = object.getWorldPosition(new THREE.Vector3()).add(delta);
+      object.position.copy(object.parent.worldToLocal(worldPosition));
+      object.updateMatrixWorld(true);
+    }
+  }
+
+  private rotateObjectsAroundWorldCenter(
+    objects: THREE.Object3D[],
+    center: THREE.Vector3,
+    rotationDelta: THREE.Quaternion,
+    startPositions?: Map<string, THREE.Vector3>,
+    startWorldQuaternions?: Map<string, THREE.Quaternion>,
+  ) {
+    for (const object of objects) {
+      if (!object.parent) {
+        continue;
+      }
+      const startPosition =
+        startPositions?.get(object.uuid) ??
+        object.getWorldPosition(new THREE.Vector3());
+      const startQuaternion =
+        startWorldQuaternions?.get(object.uuid) ??
+        object.getWorldQuaternion(new THREE.Quaternion());
+      const nextWorldPosition = startPosition
+        .clone()
+        .sub(center)
+        .applyQuaternion(rotationDelta)
+        .add(center);
+      object.position.copy(object.parent.worldToLocal(nextWorldPosition));
+      const parentWorldQuaternion = object.parent.getWorldQuaternion(
+        new THREE.Quaternion(),
+      );
+      object.quaternion.copy(
+        parentWorldQuaternion
+          .invert()
+          .multiply(rotationDelta.clone().multiply(startQuaternion)),
+      );
+      object.updateMatrixWorld(true);
+    }
+  }
+
   private getSelectionBox(objects = this.getSelectedObjects()) {
     if (objects.length === 0) {
       return null;
@@ -3132,7 +3592,9 @@ export class ThreeEditor {
       return;
     }
     this.transformPivot.position.copy(box.getCenter(new THREE.Vector3()));
+    this.transformPivot.rotation.set(0, 0, 0);
     this.transformPivot.updateMatrixWorld(true);
+    this.transformControls.setMode(this.transformMode);
     this.transformControls.attach(this.transformPivot);
     this.transformControls.enabled = true;
     this.setTransformHelperVisible(true);
@@ -3244,16 +3706,21 @@ export class ThreeEditor {
     this.directional.intensity =
       this.environmentConfig.directionalIntensity *
       preset.lighting.directionalMultiplier;
-    this.scene.background = new THREE.Color(preset.lighting.background);
+    const background = resolveWeatherBackground(
+      this.weatherConfig.mode,
+      this.appearanceTheme,
+    );
+    this.scene.background = new THREE.Color(background);
     const fogDensity = resolveWeatherFogDensity(
       preset.lighting.fogDensity,
       this.getWeatherSceneSpan(),
     );
     this.scene.fog =
       fogDensity > 0
-        ? new THREE.FogExp2(preset.lighting.background, fogDensity)
+        ? new THREE.FogExp2(background, fogDensity)
         : null;
     if (this.renderer) {
+      this.renderer.setClearColor(background, 1);
       this.renderer.toneMappingExposure = resolveToneMappingExposure({
         exposure: this.environmentConfig.exposure,
         weatherExposureOffset: preset.lighting.exposureOffset,
@@ -4027,25 +4494,45 @@ export class ThreeEditor {
     this.clearHaCoverAnimationsForObjects(objects);
     this.updateTransformControls();
     this.transformStartPivot.copy(this.transformPivot.position);
+    this.transformPreviousPivot.copy(this.transformPivot.position);
+    this.transformStartQuaternion.copy(this.transformPivot.quaternion);
     this.transformStartPositions.clear();
+    this.transformStartWorldQuaternions.clear();
     this.transformStartSnapshots = this.captureSnapshots(objects);
     for (const object of objects) {
       this.transformStartPositions.set(
         object.uuid,
         object.getWorldPosition(new THREE.Vector3()),
       );
+      this.transformStartWorldQuaternions.set(
+        object.uuid,
+        object.getWorldQuaternion(new THREE.Quaternion()),
+      );
     }
   };
 
   private handleTransformChange = () => {
-    const delta = this.transformPivot.position.clone().sub(this.transformStartPivot);
-    for (const object of this.getSelectedObjects()) {
-      const startWorldPosition = this.transformStartPositions.get(object.uuid);
-      if (!startWorldPosition || !object.parent) {
-        continue;
-      }
-      const nextWorldPosition = startWorldPosition.clone().add(delta);
-      object.position.copy(object.parent.worldToLocal(nextWorldPosition));
+    const objects = this.getSelectedObjects();
+    if (this.transformMode === "rotate") {
+      const rotationDelta = this.transformStartQuaternion
+        .clone()
+        .invert()
+        .premultiply(this.transformPivot.quaternion);
+      this.rotateObjectsAroundWorldCenter(
+        objects,
+        this.transformStartPivot,
+        rotationDelta,
+        this.transformStartPositions,
+        this.transformStartWorldQuaternions,
+      );
+    } else {
+      const deltaValues = getIncrementalTransformDelta(
+        this.transformPreviousPivot,
+        this.transformPivot.position,
+      );
+      const delta = new THREE.Vector3(deltaValues.x, deltaValues.y, deltaValues.z);
+      this.translateObjectsByWorldDelta(objects, delta);
+      this.transformPreviousPivot.copy(this.transformPivot.position);
     }
     this.updateSelectionBox();
   };
@@ -4055,18 +4542,78 @@ export class ThreeEditor {
     const before = this.transformStartSnapshots;
     const after = this.captureSnapshots(objects);
     this.transformStartPositions.clear();
+    this.transformStartWorldQuaternions.clear();
     this.transformStartSnapshots = [];
     this.updateTransformControls();
     this.options.onModelChange?.();
-    this.pushTransformHistory("移动零件", before, after);
+    this.pushTransformHistory(
+      this.transformMode === "rotate" ? "旋转零件" : "移动零件",
+      before,
+      after,
+    );
   };
 
   private handleTransformDraggingChange = (event: { value: unknown }) => {
     if (!this.controls) {
       return;
     }
+    if (this.isFirstPersonActive()) {
+      this.controls.enabled = false;
+      return;
+    }
     this.controls.enabled = event.value !== true;
   };
+
+  private handleFirstPersonKeyDown = (event: KeyboardEvent) => {
+    this.handleFirstPersonKeyboardEvent(event, true);
+  };
+
+  private handleFirstPersonKeyUp = (event: KeyboardEvent) => {
+    this.handleFirstPersonKeyboardEvent(event, false);
+  };
+
+  private handleFirstPersonKeyboardEvent(event: KeyboardEvent, active: boolean) {
+    if (!this.isFirstPersonActive() || this.isEditableKeyboardTarget(event.target)) {
+      return;
+    }
+    const direction = this.resolveFirstPersonKeyDirection(event.code);
+    if (direction) {
+      this.setFirstPersonMoveDirection(direction, active);
+      event.preventDefault();
+      return;
+    }
+    if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+      this.firstPersonMoveState.fast = active;
+      event.preventDefault();
+    }
+  }
+
+  private resolveFirstPersonKeyDirection(code: string): FirstPersonDirection | null {
+    if (code === "KeyW" || code === "ArrowUp") {
+      return "forward";
+    }
+    if (code === "KeyS" || code === "ArrowDown") {
+      return "backward";
+    }
+    if (code === "KeyA" || code === "ArrowLeft") {
+      return "left";
+    }
+    if (code === "KeyD" || code === "ArrowRight") {
+      return "right";
+    }
+    return null;
+  }
+
+  private isEditableKeyboardTarget(target: EventTarget | null) {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    const tagName = target.tagName.toLowerCase();
+    return (
+      ["input", "textarea", "select"].includes(tagName) ||
+      target.isContentEditable
+    );
+  }
 
   private normalizedDragRect(
     start: { x: number; y: number },
@@ -4114,6 +4661,9 @@ export class ThreeEditor {
     const selected: string[] = [];
     this.modelRoot.traverse((node) => {
       if (!(node as THREE.Mesh).isMesh) {
+        return;
+      }
+      if (!node.visible) {
         return;
       }
       const box = new THREE.Box3().setFromObject(node);

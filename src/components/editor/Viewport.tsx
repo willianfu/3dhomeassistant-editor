@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { PointerEvent, ReactNode } from "react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp } from "lucide-react";
 import type { EditorHistoryState } from "../../lib/editor-history";
+import type { FirstPersonDirection } from "../../lib/first-person-controls";
 import { ThreeEditor } from "../../lib/three-editor";
-import type { PerformanceConfig, ViewMode } from "../../types/editor";
+import { cn } from "../../lib/utils";
+import type { AppearanceTheme } from "../../types/appearance";
+import type {
+  PerformanceConfig,
+  PreviewCameraMode,
+  ViewMode,
+} from "../../types/editor";
+import { Button } from "../ui/button";
+
+type RenderStats = {
+  calls: number;
+  triangles: number;
+  points: number;
+  lines: number;
+};
 
 type ViewportProps = {
   performance: PerformanceConfig;
@@ -22,8 +38,46 @@ type ViewportProps = {
   error: string | null;
   viewMode: ViewMode;
   previewMode: boolean;
+  previewCameraMode: PreviewCameraMode;
+  appearanceTheme: AppearanceTheme;
   children?: ReactNode;
 };
+
+function FirstPersonMoveButton({
+  direction,
+  label,
+  className,
+  children,
+  onMove,
+}: {
+  direction: FirstPersonDirection;
+  label: string;
+  className?: string;
+  children: ReactNode;
+  onMove: (direction: FirstPersonDirection, active: boolean) => void;
+}) {
+  const setActive = (active: boolean) => (event: PointerEvent) => {
+    event.preventDefault();
+    onMove(direction, active);
+  };
+
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      size="icon"
+      aria-label={label}
+      className={cn("size-11 touch-none rounded-md bg-panel/85 shadow-xl backdrop-blur", className)}
+      onPointerDown={setActive(true)}
+      onPointerUp={setActive(false)}
+      onPointerCancel={setActive(false)}
+      onPointerLeave={setActive(false)}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {children}
+    </Button>
+  );
+}
 
 export function Viewport({
   performance,
@@ -40,6 +94,8 @@ export function Viewport({
   error,
   viewMode,
   previewMode,
+  previewCameraMode,
+  appearanceTheme,
   children,
 }: ViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -54,6 +110,7 @@ export function Viewport({
   });
   const editorRef = useRef<ThreeEditor | null>(null);
   const [fps, setFps] = useState<number | null>(null);
+  const [renderStats, setRenderStats] = useState<RenderStats | null>(null);
 
   useEffect(() => {
     callbacksRef.current = {
@@ -88,7 +145,10 @@ export function Viewport({
       onObjectContextMenu: (event) => callbacksRef.current.onObjectContextMenu(event),
       onRegionDraftChange: (pointCount) =>
         callbacksRef.current.onRegionDraftChange(pointCount),
-      onFpsChange: setFps,
+      onFpsChange: (nextFps, stats) => {
+        setFps(nextFps);
+        setRenderStats(stats ?? null);
+      },
     });
     let disposed = false;
     void editor.init().then(() => {
@@ -122,8 +182,19 @@ export function Viewport({
     editorRef.current?.setViewMode(viewMode);
   }, [viewMode]);
 
+  useEffect(() => {
+    editorRef.current?.setAppearanceTheme(appearanceTheme);
+  }, [appearanceTheme]);
+
+  const handleFirstPersonMove = (
+    direction: FirstPersonDirection,
+    active: boolean,
+  ) => {
+    editorRef.current?.setFirstPersonMoveDirection(direction, active);
+  };
+
   return (
-    <section className="relative min-w-0 flex-1 overflow-hidden bg-[#0b1017]">
+    <section className="relative min-w-0 flex-1 overflow-hidden bg-background">
       <div
         ref={hostRef}
         className="h-full w-full"
@@ -144,6 +215,42 @@ export function Viewport({
         }}
       />
       {children}
+      {previewMode && previewCameraMode === "firstPerson" ? (
+        <div className="pointer-events-auto absolute bottom-8 left-4 grid grid-cols-3 gap-1.5 lg:hidden">
+          <FirstPersonMoveButton
+            direction="forward"
+            label="向前移动"
+            className="col-start-2"
+            onMove={handleFirstPersonMove}
+          >
+            <ArrowUp />
+          </FirstPersonMoveButton>
+          <FirstPersonMoveButton
+            direction="left"
+            label="向左移动"
+            className="col-start-1 row-start-2"
+            onMove={handleFirstPersonMove}
+          >
+            <ArrowLeft />
+          </FirstPersonMoveButton>
+          <FirstPersonMoveButton
+            direction="backward"
+            label="向后移动"
+            className="col-start-2 row-start-2"
+            onMove={handleFirstPersonMove}
+          >
+            <ArrowDown />
+          </FirstPersonMoveButton>
+          <FirstPersonMoveButton
+            direction="right"
+            label="向右移动"
+            className="col-start-3 row-start-2"
+            onMove={handleFirstPersonMove}
+          >
+            <ArrowRight />
+          </FirstPersonMoveButton>
+        </div>
+      ) : null}
       {!previewMode ? (
         <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-border bg-panel/80 px-3 py-2 text-xs text-muted-foreground shadow-xl backdrop-blur">
           {viewMode === "perspective"
@@ -166,6 +273,9 @@ export function Viewport({
       {fps !== null ? (
         <div className="pointer-events-none absolute bottom-2 left-2 select-none rounded bg-background/25 px-1.5 py-0.5 font-mono text-[10px] leading-none text-muted-foreground/55">
           {fps} fps
+          {renderStats
+            ? ` · ${renderStats.calls} calls · ${Math.round(renderStats.triangles / 1000)}k tris`
+            : ""}
         </div>
       ) : null}
     </section>

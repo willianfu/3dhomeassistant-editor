@@ -58,6 +58,20 @@ export function flattenModelTree(root: ModelTreeNode): ModelTreeNode[] {
   return [root, ...root.children.flatMap((child) => flattenModelTree(child))];
 }
 
+export function flattenVisibleModelTree(
+  root: ModelTreeNode,
+  expandedIds: ReadonlySet<string>,
+): ModelTreeNode[] {
+  const nodes = [root];
+  if (!expandedIds.has(root.id)) {
+    return nodes;
+  }
+  for (const child of root.children) {
+    nodes.push(...flattenVisibleModelTree(child, expandedIds));
+  }
+  return nodes;
+}
+
 export function getObjectMetadata(object: THREE.Object3D): ObjectMetadata {
   let meshCount = 0;
   object.traverse((node) => {

@@ -52,6 +52,8 @@ export type WeatherPreset = {
   };
 };
 
+type AppearanceTheme = "dark" | "light";
+
 export const defaultWeather: WeatherConfig = {
   mode: "none",
   realtimeEnabled: true,
@@ -221,6 +223,27 @@ const PRESETS: Record<WeatherMode, WeatherPreset> = {
     },
   },
 };
+
+const LIGHT_THEME_BACKGROUNDS: Record<WeatherMode, number> = {
+  none: 0xd9e7f2,
+  sunny: 0xc8e3f6,
+  cloudy: 0xc4d2df,
+  overcast: 0xb5c0ca,
+  wind: 0xbdccd8,
+  "rain-light": 0xaab8c4,
+  "rain-medium": 0x8d9aa7,
+  "rain-heavy": 0x6f7d8d,
+  lightning: 0x38465a,
+};
+
+export function resolveWeatherBackground(
+  mode: WeatherMode,
+  theme: AppearanceTheme,
+) {
+  return theme === "light"
+    ? LIGHT_THEME_BACKGROUNDS[mode]
+    : PRESETS[mode].lighting.background;
+}
 
 export function getWeatherPreset(mode: WeatherMode): WeatherPreset {
   return PRESETS[mode];

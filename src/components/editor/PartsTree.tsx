@@ -1,5 +1,6 @@
 import {
   Cuboid,
+  ChevronRight,
   Eye,
   EyeOff,
   Folder,
@@ -13,7 +14,7 @@ import {
 import type { DragEvent, KeyboardEvent } from "react";
 import { useMemo, useRef, useState } from "react";
 import type { ModelLibraryItem } from "../../lib/model-library";
-import { flattenModelTree } from "../../lib/model-tree";
+import { flattenVisibleModelTree } from "../../lib/model-tree";
 import { cn } from "../../lib/utils";
 import { getVirtualRange } from "../../lib/virtual-list";
 import type {
@@ -92,11 +93,15 @@ function groupModelLibraryItems(items: ModelLibraryItem[]): ModelLibraryGroup[] 
 function TreeRow({
   node,
   selected,
+  expanded,
   onSelect,
+  onToggleExpanded,
 }: {
   node: ModelTreeNode;
   selected: boolean;
+  expanded: boolean;
   onSelect: (uuid: string) => void;
+  onToggleExpanded: (uuid: string) => void;
 }) {
   const hasChildren = node.children.length > 0;
 
@@ -112,6 +117,24 @@ function TreeRow({
       )}
       style={{ paddingLeft: `${8 + node.depth * 14}px` }}
     >
+      {hasChildren ? (
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={expanded ? "折叠零件层级" : "展开零件层级"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleExpanded(node.id);
+          }}
+          className="grid size-5 shrink-0 place-items-center rounded-sm hover:bg-secondary"
+        >
+          <ChevronRight
+            className={cn("transition-transform", expanded && "rotate-90")}
+          />
+        </span>
+      ) : (
+        <span className="size-5 shrink-0" />
+      )}
       {hasChildren ? <Folder data-icon="inline-start" /> : <Cuboid data-icon="inline-start" />}
       <span className="min-w-0 flex-1 truncate">{node.name}</span>
       <Badge variant="secondary" className="shrink-0">
@@ -519,8 +542,23 @@ export function PartsTree({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(1);
-  const flatNodes = useMemo(() => (tree ? flattenModelTree(tree) : []), [tree]);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
+  const flatNodes = useMemo(
+    () => (tree ? flattenVisibleModelTree(tree, expandedIds) : []),
+    [expandedIds, tree],
+  );
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const toggleExpanded = (uuid: string) => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (next.has(uuid)) {
+        next.delete(uuid);
+      } else {
+        next.add(uuid);
+      }
+      return next;
+    });
+  };
   const virtualRange = getVirtualRange({
     itemCount: flatNodes.length,
     rowHeight: ROW_HEIGHT,
@@ -569,7 +607,9 @@ export function PartsTree({
                       key={node.id}
                       node={node}
                       selected={selectedSet.has(node.id)}
+                      expanded={expandedIds.has(node.id)}
                       onSelect={onSelect}
+                      onToggleExpanded={toggleExpanded}
                     />
                   ))}
                 </div>

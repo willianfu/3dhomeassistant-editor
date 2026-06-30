@@ -6,6 +6,7 @@ import {
   EyeOff,
   Maximize2,
   Minimize2,
+  Moon,
   CloudSun,
   MapPin,
   PanelLeftClose,
@@ -21,6 +22,7 @@ import {
   Wind,
   Zap,
 } from "lucide-react";
+import type { AppearanceConfig } from "../../types/appearance";
 import type { EditorHistoryState } from "../../lib/editor-history";
 import { canRetryHaConnection } from "../../lib/ha-status";
 import { cn } from "../../lib/utils";
@@ -55,6 +57,7 @@ export type TopToolbarProps = {
   haStatus: HaConnectionStatus;
   haStatusMessage: string;
   weather: WeatherConfig;
+  appearance: AppearanceConfig;
   weatherStatus?: string | null;
   weatherSoundEnabled: boolean;
   fullscreen: boolean;
@@ -68,6 +71,7 @@ export type TopToolbarProps = {
   onUndo: () => void;
   onRedo: () => void;
   onWeatherChange: (weather: WeatherConfig) => void;
+  onAppearanceChange: (appearance: AppearanceConfig) => void;
   onWeatherSoundToggle: () => void;
   onViewModeChange: (mode: ViewMode) => void;
   onToggleLeft: () => void;
@@ -321,6 +325,7 @@ export function TopToolbar({
   haStatus,
   haStatusMessage,
   weather,
+  appearance,
   weatherStatus,
   weatherSoundEnabled,
   fullscreen,
@@ -334,6 +339,7 @@ export function TopToolbar({
   onUndo,
   onRedo,
   onWeatherChange,
+  onAppearanceChange,
   onWeatherSoundToggle,
   onViewModeChange,
   onToggleLeft,
@@ -341,7 +347,7 @@ export function TopToolbar({
 }: TopToolbarProps) {
   return (
     <TooltipProvider delayDuration={120}>
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-panel/95 px-3 backdrop-blur">
+      <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-panel/95 px-3 py-2 backdrop-blur">
         <div className="flex min-w-0 items-center gap-2">
           {!previewMode ? (
             <IconButton
@@ -365,7 +371,7 @@ export function TopToolbar({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           <HaStatus
             status={haStatus}
             message={haStatusMessage}
@@ -376,6 +382,16 @@ export function TopToolbar({
             weatherStatus={weatherStatus}
             onChange={onWeatherChange}
           />
+          <IconButton
+            label={appearance.theme === "dark" ? "切换亮色主题" : "切换暗色主题"}
+            onClick={() =>
+              onAppearanceChange({
+                theme: appearance.theme === "dark" ? "light" : "dark",
+              })
+            }
+          >
+            {appearance.theme === "dark" ? <Sun /> : <Moon />}
+          </IconButton>
           <IconButton
             label={weatherSoundEnabled ? "关闭天气音效" : "开启天气音效"}
             onClick={onWeatherSoundToggle}
@@ -394,6 +410,7 @@ export function TopToolbar({
                 {([
                   ["manual", "手动视角"],
                   ["auto", "自动视角"],
+                  ["firstPerson", "第一人称"],
                 ] as const).map(([mode, label]) => (
                   <Button
                     key={mode}

@@ -29,6 +29,8 @@ import { defaultHaRuntimeConfig, type HaRuntimeConfig } from "./lib/ha-config";
 import { cn } from "./lib/utils";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
 import { resolveWeatherSoundSource } from "./lib/weather-sound";
+import { getKeyboardNudgeDelta } from "./lib/keyboard-nudge";
+import { degreesToRadiansVector } from "./lib/rotation";
 import { fetchQWeatherNow } from "./lib/qweather";
 import { getSolarEnvironmentPreset } from "./lib/environment-lighting";
 import {
@@ -64,10 +66,16 @@ import type {
   PerformanceConfig,
   PreviewCameraMode,
   SelectionTransformInfo,
+  TransformMode,
   ViewMode,
   Vector3Values,
 } from "./types/editor";
 import { defaultEnvironment, defaultPerformance } from "./types/editor";
+import {
+  defaultAppearance,
+  normalizeAppearanceConfig,
+  type AppearanceConfig,
+} from "./types/appearance";
 import { Button } from "./components/ui/button";
 import {
   Dialog,
@@ -140,6 +148,7 @@ export default function App() {
   const [previewMode, setPreviewMode] = useState(false);
   const [previewCameraMode, setPreviewCameraMode] =
     useState<PreviewCameraMode>("manual");
+  const [transformMode, setTransformMode] = useState<TransformMode>("translate");
   const [fullscreen, setFullscreen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("perspective");
   const [isLoading, setIsLoading] = useState(false);
@@ -174,6 +183,9 @@ export default function App() {
   );
   const [performanceConfig, setPerformanceConfig] = useState<PerformanceConfig>(
     localConfigRef.current?.performance ?? defaultPerformance,
+  );
+  const [appearance, setAppearance] = useState<AppearanceConfig>(
+    localConfigRef.current?.appearance ?? defaultAppearance,
   );
   const [weather, setWeather] = useState<WeatherConfig>(
     localConfigRef.current?.weather ?? defaultWeather,
@@ -339,6 +351,12 @@ export default function App() {
   }, [editor, weather]);
 
   useEffect(() => {
+    document.documentElement.classList.toggle("dark", appearance.theme === "dark");
+    document.documentElement.dataset.theme = appearance.theme;
+    editor?.setAppearanceTheme(appearance.theme);
+  }, [appearance.theme, editor]);
+
+  useEffect(() => {
     editor?.setRegions(regions, selectedRegionId);
   }, [editor, regions, selectedRegionId]);
 
@@ -470,6 +488,10 @@ export default function App() {
   }, [editor, previewCameraMode]);
 
   useEffect(() => {
+    editor?.setTransformMode(transformMode);
+  }, [editor, transformMode]);
+
+  useEffect(() => {
     editor?.applyHaStates(ha.states);
   }, [editor, ha.states, modelVersion]);
 
@@ -488,8 +510,16 @@ export default function App() {
 
   useEffect(() => {
     const nextConfig =
-      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig, regions) ?? {
+      editor?.createLocalConfig(
+        environment,
+        weather,
+        haConfig,
+        performanceConfig,
+        regions,
+        appearance,
+      ) ?? {
         version: 1,
+        appearance,
         environment,
         performance: performanceConfig,
         weather,
@@ -499,7 +529,16 @@ export default function App() {
       };
     localConfigRef.current = nextConfig;
     saveEditorLocalConfig(nextConfig);
-  }, [editor, environment, haConfig, modelVersion, performanceConfig, regions, weather]);
+  }, [
+    appearance,
+    editor,
+    environment,
+    haConfig,
+    modelVersion,
+    performanceConfig,
+    regions,
+    weather,
+  ]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -540,6 +579,17 @@ export default function App() {
         }
         refreshTree();
         return;
+      }
+
+      if (!isEditableTarget(event.target)) {
+        const nudgeDelta = getKeyboardNudgeDelta(event);
+        if (nudgeDelta) {
+          event.preventDefault();
+          if (editor?.nudgeSelection(nudgeDelta)) {
+            refreshTree();
+          }
+          return;
+        }
       }
 
       if (!shouldHandleDeleteKey(event)) {
@@ -626,6 +676,7 @@ export default function App() {
       }
       const nextConfig = {
         ...parsed,
+        appearance: normalizeAppearanceConfig(parsed.appearance),
         performance: normalizePerformanceConfig(parsed.performance),
         ha: parsed.ha ?? defaultHaRuntimeConfig(),
         regions: normalizeEditorRegions(parsed.regions),
@@ -633,6 +684,7 @@ export default function App() {
       localConfigRef.current = nextConfig;
       saveEditorLocalConfig(nextConfig);
       setEnvironment({ ...defaultEnvironment, ...(parsed.environment ?? {}) });
+      setAppearance(nextConfig.appearance);
       setPerformanceConfig(nextConfig.performance);
       setWeather({ ...defaultWeather, ...(parsed.weather ?? {}) });
       setHaConfig(nextConfig.ha);
@@ -868,10 +920,18 @@ export default function App() {
 
   const handleExportConfig = () => {
     const config =
-      editor?.createLocalConfig(environment, weather, haConfig, performanceConfig, regions) ??
+      editor?.createLocalConfig(
+        environment,
+        weather,
+        haConfig,
+        performanceConfig,
+        regions,
+        appearance,
+      ) ??
       localConfigRef.current ??
       {
         version: 1,
+        appearance,
         environment,
         performance: performanceConfig,
         weather,
@@ -919,6 +979,21 @@ export default function App() {
 
   const handleUniformScale = (multiplier: number) => {
     editor?.scaleSelectionUniform(multiplier);
+    refreshTree();
+  };
+
+  const handleSelectionRotationChange = (rotationDegrees: Vector3Values) => {
+    const rotation = degreesToRadiansVector(rotationDegrees);
+    if (selectedIds.length === 1) {
+      editor?.updateSelectionRotation(rotation);
+    } else {
+      editor?.rotateSelection(rotation);
+    }
+    refreshTree();
+  };
+
+  const handleRotateSelection = (rotationDegrees: Vector3Values) => {
+    editor?.rotateSelection(degreesToRadiansVector(rotationDegrees));
     refreshTree();
   };
 
@@ -972,6 +1047,14 @@ export default function App() {
     setBindingDialogOpen(false);
   };
 
+  const handlePreviewCameraModeChange = (mode: PreviewCameraMode) => {
+    setPreviewCameraMode(mode);
+    if (mode === "firstPerson") {
+      setViewMode("perspective");
+      editor?.setViewMode("perspective");
+    }
+  };
+
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <TopToolbar
@@ -993,7 +1076,7 @@ export default function App() {
         onImportConfigClick={handleImportConfigClick}
         onExport={() => setExportDialogOpen(true)}
         onTogglePreview={() => setPreviewMode((value) => !value)}
-        onPreviewCameraModeChange={setPreviewCameraMode}
+        onPreviewCameraModeChange={handlePreviewCameraModeChange}
         onToggleFullscreen={() => void toggleFullscreen()}
         onRetryHaConnection={ha.retryConnection}
         onUndo={() => {
@@ -1012,6 +1095,8 @@ export default function App() {
         }}
         onWeatherChange={setWeather}
         onWeatherSoundToggle={() => setWeatherSoundEnabled((value) => !value)}
+        appearance={appearance}
+        onAppearanceChange={setAppearance}
         onToggleLeft={() => setLeftCollapsed((value) => !value)}
         onToggleRight={() => setRightCollapsed((value) => !value)}
       />
@@ -1089,6 +1174,8 @@ export default function App() {
           error={error}
           viewMode={viewMode}
           previewMode={previewMode}
+          previewCameraMode={previewCameraMode}
+          appearanceTheme={appearance.theme}
         >
           <RegionSidePanel
             regions={visibleRegions}
@@ -1148,6 +1235,7 @@ export default function App() {
             selectionTransform={selectionTransform}
             selectionBindings={selectionBindings}
             selectedCount={selectedIds.length}
+            transformMode={transformMode}
             onEnvironmentChange={handleEnvironmentChange}
             onPerformanceChange={setPerformanceConfig}
             onHaConfigChange={setHaConfig}
@@ -1157,6 +1245,9 @@ export default function App() {
             onSizeChange={handleSizeChange}
             onCenterChange={handleCenterChange}
             onUniformScale={handleUniformScale}
+            onSelectionRotationChange={handleSelectionRotationChange}
+            onRotateSelection={handleRotateSelection}
+            onTransformModeChange={setTransformMode}
             regions={regions}
             onOpenBindingDialog={() => setBindingDialogOpen(true)}
             onBindingsChange={handleBindingsChange}

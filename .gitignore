@@ -8,3 +8,5 @@ dist/
 *.spec.*
 __tests__/
 coverage/
+previte/
+models/

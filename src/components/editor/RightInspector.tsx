@@ -1,10 +1,21 @@
-import { Boxes, Copy, DoorOpen, Lightbulb, Link2, Trash2, X } from "lucide-react";
+import {
+  Boxes,
+  Copy,
+  DoorOpen,
+  Lightbulb,
+  Link2,
+  Move3D,
+  RotateCcw,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { removeHaBinding } from "../../lib/ha-bindings";
 import { defaultLightCapabilityConfig } from "../../lib/ha-capabilities/light";
 import { getEntityDomain } from "../../lib/ha-client";
 import type { HaRuntimeConfig } from "../../lib/ha-config";
 import { getSolarEnvironmentPreset } from "../../lib/environment-lighting";
+import { radiansToDegreesVector } from "../../lib/rotation";
 import { cn } from "../../lib/utils";
 import type {
   EnvironmentConfig,
@@ -15,6 +26,7 @@ import type {
   RenderBackend,
   RenderQuality,
   SelectionTransformInfo,
+  TransformMode,
   Vector3Values,
 } from "../../types/editor";
 import type {
@@ -68,6 +80,7 @@ type RightInspectorProps = {
   selectionTransform: SelectionTransformInfo | null;
   selectionBindings: HaBinding[];
   selectedCount: number;
+  transformMode: TransformMode;
   onEnvironmentChange: (config: EnvironmentConfig) => void;
   onPerformanceChange: (config: PerformanceConfig) => void;
   onHaConfigChange: (config: HaRuntimeConfig) => void;
@@ -77,6 +90,9 @@ type RightInspectorProps = {
   onSizeChange: (size: Vector3Values) => void;
   onCenterChange: (center: Vector3Values) => void;
   onUniformScale: (multiplier: number) => void;
+  onSelectionRotationChange: (rotationDegrees: Vector3Values) => void;
+  onRotateSelection: (rotationDegrees: Vector3Values) => void;
+  onTransformModeChange: (mode: TransformMode) => void;
   regions: EditorRegion[];
   onOpenBindingDialog: () => void;
   onBindingsChange: (bindings: HaBinding[]) => void;
@@ -542,19 +558,32 @@ function HaGlobalConfigPanel({
 function SizeScalePanel({
   selectionTransform,
   metadata,
+  transformMode,
   onScaleChange,
   onSizeChange,
   onCenterChange,
   onUniformScale,
+  onSelectionRotationChange,
+  onRotateSelection,
+  onTransformModeChange,
 }: {
   selectionTransform: SelectionTransformInfo | null;
   metadata: ObjectMetadata | null;
+  transformMode: TransformMode;
   onScaleChange: (scale: Vector3Values) => void;
   onSizeChange: (size: Vector3Values) => void;
   onCenterChange: (center: Vector3Values) => void;
   onUniformScale: (multiplier: number) => void;
+  onSelectionRotationChange: (rotationDegrees: Vector3Values) => void;
+  onRotateSelection: (rotationDegrees: Vector3Values) => void;
+  onTransformModeChange: (mode: TransformMode) => void;
 }) {
   const [uniformScale, setUniformScale] = useState(1);
+  const [batchRotation, setBatchRotation] = useState<Vector3Values>({
+    x: 0,
+    y: 0,
+    z: 0,
+  });
 
   if (!selectionTransform) {
     return null;
@@ -562,6 +591,29 @@ function SizeScalePanel({
 
   return (
     <div className="grid gap-3">
+      <div className="grid gap-2">
+        <Label>渲染器操作手柄</Label>
+        <div className="grid grid-cols-2 gap-2">
+          <Button
+            type="button"
+            variant={transformMode === "translate" ? "default" : "secondary"}
+            size="sm"
+            onClick={() => onTransformModeChange("translate")}
+          >
+            <Move3D data-icon="inline-start" />
+            移动
+          </Button>
+          <Button
+            type="button"
+            variant={transformMode === "rotate" ? "default" : "secondary"}
+            size="sm"
+            onClick={() => onTransformModeChange("rotate")}
+          >
+            <RotateCcw data-icon="inline-start" />
+            旋转
+          </Button>
+        </div>
+      </div>
       <VectorFields
         labels={["长", "宽", "高"]}
         min={0.001}
@@ -593,6 +645,38 @@ function SizeScalePanel({
           />
         </div>
       ) : null}
+      <div className="grid gap-2">
+        <Label>{metadata ? "对象旋转" : "整体旋转"}</Label>
+        <VectorFields
+          labels={["X°", "Y°", "Z°"]}
+          step={1}
+          value={
+            metadata
+              ? {
+                  ...radiansToDegreesVector(metadata.rotation),
+                }
+              : batchRotation
+          }
+          onChange={(rotation) => {
+            if (metadata) {
+              onSelectionRotationChange(rotation);
+              return;
+            }
+            setBatchRotation(rotation);
+          }}
+        />
+        {!metadata ? (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => onRotateSelection(batchRotation)}
+          >
+            <RotateCcw data-icon="inline-start" />
+            应用整体旋转
+          </Button>
+        ) : null}
+      </div>
       <div className="grid grid-cols-[1fr_auto] items-end gap-2">
         <NumberField
           label="等比倍率"
@@ -1082,6 +1166,7 @@ export function RightInspector({
   selectionTransform,
   selectionBindings,
   selectedCount,
+  transformMode,
   onEnvironmentChange,
   onPerformanceChange,
   onHaConfigChange,
@@ -1091,6 +1176,9 @@ export function RightInspector({
   onSizeChange,
   onCenterChange,
   onUniformScale,
+  onSelectionRotationChange,
+  onRotateSelection,
+  onTransformModeChange,
   regions,
   onOpenBindingDialog,
   onBindingsChange,
@@ -1203,6 +1291,22 @@ export function RightInspector({
                         onCheckedChange={(checked) =>
                           updatePerformance({
                             realisticRenderingEnabled: checked,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="grid gap-1">
+                        <Label>模型阴影</Label>
+                        <div className="text-xs text-muted-foreground">
+                          关闭可显著减少大量家具模型的阴影渲染开销，不影响模型几何。
+                        </div>
+                      </div>
+                      <Switch
+                        checked={performance.modelShadowsEnabled}
+                        onCheckedChange={(checked) =>
+                          updatePerformance({
+                            modelShadowsEnabled: checked,
                           })
                         }
                       />
@@ -1347,14 +1451,18 @@ export function RightInspector({
                       />
                     ) : null}
                   </AccordionPanel>
-                  <AccordionPanel value="size" title="尺寸与缩放">
+                  <AccordionPanel value="size" title="尺寸与缩放/旋转">
                     <SizeScalePanel
                       selectionTransform={selectionTransform}
                       metadata={null}
+                      transformMode={transformMode}
                       onScaleChange={onScaleChange}
                       onSizeChange={onSizeChange}
                       onCenterChange={onCenterChange}
                       onUniformScale={onUniformScale}
+                      onSelectionRotationChange={onSelectionRotationChange}
+                      onRotateSelection={onRotateSelection}
+                      onTransformModeChange={onTransformModeChange}
                     />
                   </AccordionPanel>
                 </Accordion>
@@ -1409,14 +1517,18 @@ export function RightInspector({
                       onChange={onRegionAssignmentChange}
                     />
                   </AccordionPanel>
-                  <AccordionPanel value="size" title="尺寸与缩放">
+                  <AccordionPanel value="size" title="尺寸与缩放/旋转">
                     <SizeScalePanel
                       selectionTransform={selectionTransform}
                       metadata={metadata}
+                      transformMode={transformMode}
                       onScaleChange={onScaleChange}
                       onSizeChange={onSizeChange}
                       onCenterChange={onCenterChange}
                       onUniformScale={onUniformScale}
+                      onSelectionRotationChange={onSelectionRotationChange}
+                      onRotateSelection={onRotateSelection}
+                      onTransformModeChange={onTransformModeChange}
                     />
                   </AccordionPanel>
                 </Accordion>

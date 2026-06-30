@@ -88,21 +88,24 @@ export type EnvironmentConfig = {
 
 export type RenderBackend = "webgl" | "webgpu";
 export type RenderQuality = "low" | "medium" | "high" | "ultra";
+export type TransformMode = "translate" | "rotate";
 
 export type PerformanceConfig = {
   renderBackend: RenderBackend;
   quality: RenderQuality;
   realisticRenderingEnabled: boolean;
+  modelShadowsEnabled: boolean;
 };
 
 export const defaultPerformance: PerformanceConfig = {
   renderBackend: "webgl",
   quality: "high",
   realisticRenderingEnabled: false,
+  modelShadowsEnabled: false,
 };
 
 export type ViewMode = "perspective" | "top" | "front" | "side";
-export type PreviewCameraMode = "manual" | "auto";
+export type PreviewCameraMode = "manual" | "auto" | "firstPerson";
 
 export const defaultEnvironment: EnvironmentConfig = {
   timeOfDay: 12,

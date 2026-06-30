@@ -8,6 +8,11 @@ import {
   type EditorRegion,
   type ObjectRegionAssignment,
 } from "../types/editor";
+import {
+  defaultAppearance,
+  normalizeAppearanceConfig,
+  type AppearanceConfig,
+} from "../types/appearance";
 import type {
   HaBinding,
   HaCoverCapabilityConfig,
@@ -52,6 +57,7 @@ export type EditorObjectLocalConfig = {
 
 export type EditorLocalConfig = {
   version: 1;
+  appearance: AppearanceConfig;
   environment: EnvironmentConfig;
   performance: PerformanceConfig;
   weather: WeatherConfig;
@@ -74,6 +80,7 @@ export function normalizePerformanceConfig(
       ? (config?.quality as RenderQuality)
       : defaultPerformance.quality,
     realisticRenderingEnabled: config?.realisticRenderingEnabled === true,
+    modelShadowsEnabled: config?.modelShadowsEnabled === true,
   };
 }
 
@@ -98,6 +105,7 @@ export function createEditorLocalConfig(
   ha: HaRuntimeConfig,
   performance: PerformanceConfig = defaultPerformance,
   regions: EditorRegion[] = [],
+  appearance: AppearanceConfig = defaultAppearance,
 ): EditorLocalConfig {
   const objects: Record<string, EditorObjectLocalConfig> = {};
   root.traverse((object) => {
@@ -123,6 +131,7 @@ export function createEditorLocalConfig(
 
   return {
     version: 1,
+    appearance: normalizeAppearanceConfig(appearance),
     environment,
     performance: normalizePerformanceConfig(performance),
     weather,
@@ -184,6 +193,7 @@ export function loadEditorLocalConfig(
         ...defaultEnvironment,
         ...(parsed.environment ?? {}),
       },
+      appearance: normalizeAppearanceConfig(parsed.appearance),
       performance: normalizePerformanceConfig(parsed.performance),
       ha: parsed.ha ?? defaultHaRuntimeConfig(),
       regions: normalizeEditorRegions(parsed.regions),
