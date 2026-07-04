@@ -8,6 +8,7 @@ import {
   Minimize2,
   Moon,
   CloudSun,
+  Image,
   MapPin,
   PanelLeftClose,
   PanelLeftOpen,
@@ -64,6 +65,7 @@ export type TopToolbarProps = {
   onUploadClick: () => void;
   onExport: () => void;
   onImportConfigClick: () => void;
+  onEnvironmentMapClick: () => void;
   onTogglePreview: () => void;
   onPreviewCameraModeChange: (mode: PreviewCameraMode) => void;
   onToggleFullscreen: () => void;
@@ -332,6 +334,7 @@ export function TopToolbar({
   onUploadClick,
   onExport,
   onImportConfigClick,
+  onEnvironmentMapClick,
   onTogglePreview,
   onPreviewCameraModeChange,
   onToggleFullscreen,
@@ -486,6 +489,15 @@ export function TopToolbar({
               >
                 <Upload data-icon="inline-start" />
                 配置
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onEnvironmentMapClick}
+                disabled={isLoading}
+              >
+                <Image data-icon="inline-start" />
+                环境
               </Button>
               <Button
                 variant="secondary"

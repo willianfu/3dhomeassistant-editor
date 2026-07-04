@@ -5,7 +5,10 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { EXRLoader } from "three/addons/loaders/EXRLoader.js";
+import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import { GroundedSkybox } from "three/addons/objects/GroundedSkybox.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import type {
@@ -57,6 +60,15 @@ import type {
 } from "../types/ha";
 import { defaultEnvironment, defaultPerformance } from "../types/editor";
 import { EditorHistory, type EditorHistoryState } from "./editor-history";
+import {
+  getEnvironmentMapKind,
+  isSupportedEnvironmentMapFile,
+} from "./environment-map";
+import {
+  getEmptySceneOrbitTarget,
+  getGroundedOrbitTarget,
+  getManualEnvironmentSkyboxTransform,
+} from "./environment-grounding";
 import {
   clampToFirstPersonBounds,
   getFirstPersonSpawnPosition,
@@ -320,6 +332,10 @@ export class ThreeEditor {
   private weatherLightningCooldownFrames = 0;
   private lastFrameTime = 0;
   private generatedEnvironmentMap: THREE.Texture | null = null;
+  private manualEnvironmentMap: THREE.Texture | null = null;
+  private manualEnvironmentSourceMap: THREE.Texture | null = null;
+  private manualEnvironmentBackground: THREE.Texture | null = null;
+  private manualEnvironmentSkybox: GroundedSkybox | null = null;
   private fpsMeter = new FpsMeter();
   private selectedIds = new Set<string>();
   private selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x29d3c4);
@@ -403,7 +419,7 @@ export class ThreeEditor {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.maxPolarAngle = Math.PI / 2.05;
-    this.controls.target.set(0, 0.8, 0);
+    this.setControlsTargetToEmptySceneGridCenter();
     this.applyControlMode("perspective");
     this.controls.update();
 
@@ -539,6 +555,13 @@ export class ThreeEditor {
   private applyStudioEnvironment() {
     if (this.generatedEnvironmentMap) {
       this.generatedEnvironmentMap.dispose();
+      this.generatedEnvironmentMap = null;
+    }
+    if (this.manualEnvironmentMap) {
+      this.scene.environment = this.manualEnvironmentMap;
+      this.scene.background = this.manualEnvironmentBackground;
+      this.scene.environmentIntensity = 1;
+      return;
     }
     const faces = [
       this.createEnvironmentFace("#d7e5f2", "#edf5ff"),
@@ -557,10 +580,11 @@ export class ThreeEditor {
   }
 
   private clearStudioEnvironment() {
-    this.scene.environment = null;
-    this.scene.environmentIntensity = 1;
     this.generatedEnvironmentMap?.dispose();
     this.generatedEnvironmentMap = null;
+    this.scene.environment = this.manualEnvironmentMap;
+    this.scene.background = this.manualEnvironmentBackground;
+    this.scene.environmentIntensity = this.manualEnvironmentMap ? 1 : 1;
   }
 
   private updateRealisticRendering() {
@@ -594,6 +618,103 @@ export class ThreeEditor {
     return canvas;
   }
 
+  async loadEnvironmentMap(file: File) {
+    if (!this.renderer) {
+      throw new Error("ThreeEditor has not been initialized.");
+    }
+    const kind = getEnvironmentMapKind(file.name);
+    if (!kind || !isSupportedEnvironmentMapFile(file)) {
+      throw new Error("仅支持加载 .hdr 或 .exr 环境贴图文件。");
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const sourceTexture =
+        kind === "hdr"
+          ? await new RGBELoader().loadAsync(url)
+          : await new EXRLoader().loadAsync(url);
+      sourceTexture.mapping = THREE.EquirectangularReflectionMapping;
+      const environmentTexture = this.createPmremEnvironment(sourceTexture);
+      this.clearManualEnvironment();
+      this.manualEnvironmentSourceMap = sourceTexture;
+      this.manualEnvironmentMap = environmentTexture;
+      this.manualEnvironmentBackground = sourceTexture;
+      this.manualEnvironmentSkybox = this.createManualEnvironmentSkybox(sourceTexture);
+      this.scene.add(this.manualEnvironmentSkybox);
+      if (this.generatedEnvironmentMap) {
+        this.generatedEnvironmentMap.dispose();
+        this.generatedEnvironmentMap = null;
+      }
+      this.scene.environment = environmentTexture;
+      this.scene.background = sourceTexture;
+      this.scene.environmentIntensity = 1;
+      this.setControlsTargetToEmptySceneGridCenter();
+      return file.name;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  private createManualEnvironmentSkybox(sourceTexture: THREE.Texture) {
+    const transform = getManualEnvironmentSkyboxTransform();
+    const skybox = new GroundedSkybox(
+      sourceTexture,
+      transform.height,
+      transform.radius,
+      transform.resolution,
+    );
+    skybox.name = "manual environment grounded skybox";
+    skybox.position.y = transform.positionY;
+    skybox.frustumCulled = false;
+    skybox.renderOrder = -1000;
+    skybox.material.depthWrite = false;
+    skybox.material.fog = false;
+    return skybox;
+  }
+
+  private setControlsTargetToEmptySceneGridCenter() {
+    if (!this.controls || this.modelRoot || this.viewMode !== "perspective") {
+      return;
+    }
+    const target = getEmptySceneOrbitTarget();
+    this.controls.target.set(target.x, target.y, target.z);
+    this.controls.update();
+  }
+
+  private createPmremEnvironment(sourceTexture: THREE.Texture) {
+    if (this.renderer instanceof THREE.WebGLRenderer) {
+      const generator = new THREE.PMREMGenerator(this.renderer);
+      const environment = generator.fromEquirectangular(sourceTexture).texture;
+      generator.dispose();
+      return environment;
+    }
+    return sourceTexture;
+  }
+
+  private clearManualEnvironment() {
+    if (this.manualEnvironmentSkybox) {
+      this.scene.remove(this.manualEnvironmentSkybox);
+      this.manualEnvironmentSkybox.geometry.dispose();
+      this.manualEnvironmentSkybox.material.dispose();
+      this.manualEnvironmentSkybox = null;
+    }
+    const textures = new Set<THREE.Texture>();
+    if (this.manualEnvironmentMap) {
+      textures.add(this.manualEnvironmentMap);
+    }
+    if (this.manualEnvironmentSourceMap) {
+      textures.add(this.manualEnvironmentSourceMap);
+    }
+    if (this.manualEnvironmentBackground) {
+      textures.add(this.manualEnvironmentBackground);
+    }
+    for (const texture of textures) {
+      texture.dispose();
+    }
+    this.manualEnvironmentMap = null;
+    this.manualEnvironmentSourceMap = null;
+    this.manualEnvironmentBackground = null;
+  }
+
   dispose() {
     this.destroyed = true;
     cancelAnimationFrame(this.animationFrame);
@@ -621,6 +742,7 @@ export class ThreeEditor {
       disposeObjectTree(this.modelRoot);
     }
     this.clearHaLights();
+    this.clearManualEnvironment();
     this.generatedEnvironmentMap?.dispose();
     this.generatedEnvironmentMap = null;
     this.grid.geometry.dispose();
@@ -2455,7 +2577,8 @@ export class ThreeEditor {
     this.camera.near = Math.max(distance / 100, 0.01);
     this.camera.far = Math.max(distance * 100, 1000);
     this.camera.updateProjectionMatrix();
-    this.controls.target.copy(center);
+    const target = getGroundedOrbitTarget(center);
+    this.controls.target.set(target.x, target.y, target.z);
     this.controls.update();
   }
 
@@ -3710,7 +3833,9 @@ export class ThreeEditor {
       this.weatherConfig.mode,
       this.appearanceTheme,
     );
-    this.scene.background = new THREE.Color(background);
+    this.scene.background = this.manualEnvironmentBackground
+      ? this.manualEnvironmentBackground
+      : new THREE.Color(background);
     const fogDensity = resolveWeatherFogDensity(
       preset.lighting.fogDensity,
       this.getWeatherSceneSpan(),

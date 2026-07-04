@@ -27,6 +27,7 @@ import {
 import { normalizeEditorRegions } from "./lib/editor-regions";
 import { defaultHaRuntimeConfig, type HaRuntimeConfig } from "./lib/ha-config";
 import { cn } from "./lib/utils";
+import { isSupportedEnvironmentMapFile } from "./lib/environment-map";
 import { defaultWeather, type WeatherConfig } from "./lib/weather-presets";
 import { resolveWeatherSoundSource } from "./lib/weather-sound";
 import { getKeyboardNudgeDelta } from "./lib/keyboard-nudge";
@@ -139,6 +140,7 @@ function isEditableTarget(target: EventTarget | null) {
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const configInputRef = useRef<HTMLInputElement | null>(null);
+  const environmentMapInputRef = useRef<HTMLInputElement | null>(null);
   const libraryFileInputRef = useRef<HTMLInputElement | null>(null);
   const [editor, setEditor] = useState<ThreeEditor | null>(null);
   const [tree, setTree] = useState<ModelTreeNode | null>(null);
@@ -622,6 +624,10 @@ export default function App() {
     configInputRef.current?.click();
   };
 
+  const handleEnvironmentMapClick = () => {
+    environmentMapInputRef.current?.click();
+  };
+
   const handleLibraryUploadClick = () => {
     libraryFileInputRef.current?.click();
   };
@@ -695,6 +701,29 @@ export default function App() {
       setError(null);
     } catch (configError) {
       setError(configError instanceof Error ? configError.message : "配置导入失败。");
+    }
+  };
+
+  const handleEnvironmentMapFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !editor) {
+      return;
+    }
+    if (!isSupportedEnvironmentMapFile(file)) {
+      setError("仅支持加载 .hdr 或 .exr 环境贴图文件。");
+      return;
+    }
+    setError(null);
+    setIsLoading(true);
+    try {
+      await editor.loadEnvironmentMap(file);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "环境贴图加载失败。");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -1074,6 +1103,7 @@ export default function App() {
         fullscreen={fullscreen}
         onUploadClick={handleUploadClick}
         onImportConfigClick={handleImportConfigClick}
+        onEnvironmentMapClick={handleEnvironmentMapClick}
         onExport={() => setExportDialogOpen(true)}
         onTogglePreview={() => setPreviewMode((value) => !value)}
         onPreviewCameraModeChange={handlePreviewCameraModeChange}
@@ -1113,6 +1143,13 @@ export default function App() {
         accept=".json,application/json"
         className="hidden"
         onChange={handleConfigFileChange}
+      />
+      <input
+        ref={environmentMapInputRef}
+        type="file"
+        accept=".hdr,.exr"
+        className="hidden"
+        onChange={handleEnvironmentMapFileChange}
       />
       <input
         ref={libraryFileInputRef}
